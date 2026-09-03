@@ -1,0 +1,98 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 940 470" width="940" height="470" role="img" aria-label="One exo process contains a Router, EventRouter and Election that always run, plus an optional Master, Worker, API and DownloadCoordinator, all sitting above an embedded Rust layer that owns the zenoh session on its own tokio runtime. The Worker spawns separate runner OS processes that hold the model.">
+<title>One exo process contains a Router, EventRouter and Election that always run, plus an optional Master, Worker, API and DownloadCoordinator, all sitting above an embedded Rust layer that owns the zenoh session on its own tokio runtime. The Worker spawns separate runner OS processes that hold the model.</title>
+<style>
+  :root{
+    --surface:#FFFFFF; --surface-2:#EEF0F7; --ink:#14161C; --ink-2:#3A4052;
+    --muted:#666E85; --rule-2:#C3C9DA;
+    --ctl:#3F51C4; --ten:#B84A18; --wts:#1B7565; --warn:#9A2F2F;
+    --ctl-wash:#E7EAFA; --ten-wash:#FBEAE1; --wts-wash:#E1F1ED; --warn-wash:#F8E8E8;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --surface:#171A22; --surface-2:#1F2330; --ink:#E8EAF1; --ink-2:#C2C7D6;
+      --muted:#959CB0; --rule-2:#3A4152;
+      --ctl:#8D9AF2; --ten:#F0864F; --wts:#4FC3AA; --warn:#EE8A8A;
+      --ctl-wash:#1C2140; --ten-wash:#332014; --wts-wash:#132C28; --warn-wash:#331A1A;
+    }
+  }
+  .s-box{fill:var(--surface); stroke:var(--rule-2); stroke-width:1.3}
+  .s-box2{fill:var(--surface-2); stroke:var(--rule-2); stroke-width:1.3}
+  .s-ctl{fill:var(--ctl-wash); stroke:var(--ctl); stroke-width:1.3}
+  .s-ten{fill:var(--ten-wash); stroke:var(--ten); stroke-width:1.3}
+  .s-wts{fill:var(--wts-wash); stroke:var(--wts); stroke-width:1.3}
+  .s-warn{fill:var(--warn-wash); stroke:var(--warn); stroke-width:1.3}
+  .ln{stroke:var(--rule-2); stroke-width:1.3; fill:none}
+  .ln-ctl{stroke:var(--ctl); stroke-width:1.6; fill:none}
+  .ln-ten{stroke:var(--ten); stroke-width:1.6; fill:none}
+  .ln-wts{stroke:var(--wts); stroke-width:1.6; fill:none}
+  .dash{stroke-dasharray:5 4}
+  .t{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:11px; fill:var(--ink-2)}
+  .t-s{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:9.5px; fill:var(--muted)}
+  .t-b{font-family:system-ui,-apple-system,"Segoe UI",sans-serif; font-size:12.5px; font-weight:600; fill:var(--ink)}
+  .t-h{font-family:system-ui,-apple-system,"Segoe UI",sans-serif; font-size:13.5px; font-weight:700; fill:var(--ink)}
+  .t-ctl{fill:var(--ctl)} .t-ten{fill:var(--ten)} .t-wts{fill:var(--wts)} .t-warn{fill:var(--warn)}
+  .m-ctl{fill:var(--ctl)} .m-ten{fill:var(--ten)} .m-wts{fill:var(--wts)} .m-n{fill:var(--rule-2)}
+</style>
+<defs>
+  <marker id="a-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" class="m-n"/></marker>
+  <marker id="a-ctl" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" class="m-ctl"/></marker>
+  <marker id="a-ten" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" class="m-ten"/></marker>
+  <marker id="a-wts" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" class="m-wts"/></marker>
+</defs>
+
+        <rect class="s-box2" x="60" y="30" width="820" height="288" rx="5"/>
+        <text class="t-h" x="80" y="56">one exo process</text>
+        <text class="t-s" x="80" y="73">single OS process · one anyio event loop · one top-level task group</text>
+
+        <!-- always present -->
+        <text class="t-s" x="80" y="102">ALWAYS PRESENT</text>
+        <rect class="s-ctl" x="80" y="112" width="180" height="54" rx="3"/>
+        <text class="t-b" x="170" y="134" text-anchor="middle">Router</text>
+        <text class="t-s" x="170" y="151" text-anchor="middle">6 typed pub/sub topics</text>
+        <rect class="s-ctl" x="276" y="112" width="180" height="54" rx="3"/>
+        <text class="t-b" x="366" y="134" text-anchor="middle">EventRouter</text>
+        <text class="t-s" x="366" y="151" text-anchor="middle">ordering · ack · nack</text>
+        <rect class="s-ctl" x="472" y="112" width="180" height="54" rx="3"/>
+        <text class="t-b" x="562" y="134" text-anchor="middle">Election</text>
+        <text class="t-s" x="562" y="151" text-anchor="middle">3.0 s campaigns</text>
+
+        <!-- conditional -->
+        <text class="t-s" x="80" y="196">RUNTIME-CONDITIONAL</text>
+        <rect class="s-box" x="80" y="206" width="180" height="54" rx="3"/>
+        <text class="t-b" x="170" y="228" text-anchor="middle">Master</text>
+        <text class="t-s" x="170" y="245" text-anchor="middle">only while it wins</text>
+        <rect class="s-box" x="276" y="206" width="180" height="54" rx="3"/>
+        <text class="t-b" x="366" y="228" text-anchor="middle">Worker</text>
+        <text class="t-s" x="366" y="245" text-anchor="middle">plan() every 100 ms</text>
+        <rect class="s-box" x="472" y="206" width="180" height="54" rx="3"/>
+        <text class="t-b" x="562" y="228" text-anchor="middle">API</text>
+        <text class="t-s" x="562" y="245" text-anchor="middle">:52415 + dashboard</text>
+        <rect class="s-box" x="668" y="206" width="192" height="54" rx="3"/>
+        <text class="t-b" x="764" y="228" text-anchor="middle">DownloadCoordinator</text>
+        <text class="t-s" x="764" y="245" text-anchor="middle">HuggingFace pulls</text>
+
+        <!-- rust strip -->
+        <rect class="s-box" x="80" y="272" width="780" height="34" rx="3"/>
+        <text class="t" x="94" y="293">exo_rs (PyO3) → zenoh session on its own tokio runtime</text>
+        <text class="t-s" x="852" y="293" text-anchor="end">:52414 zenoh TCP · :52413 UDP discovery</text>
+
+        <!-- runner processes -->
+        <path class="ln" d="M366 260 V296" opacity="0"/>
+        <path class="ln" d="M366 260 V340 H210 V376" marker-end="url(#a-n)"/>
+        <path class="ln" d="M366 260 V376" marker-end="url(#a-n)"/>
+        <path class="ln" d="M366 260 V340 H610 V376" marker-end="url(#a-n)"/>
+        <text class="t-s" x="640" y="334">3 × multiprocessing.Queue + 2 × os.pipe, per runner</text>
+
+        <rect class="s-ten" x="120" y="378" width="180" height="60" rx="3"/>
+        <text class="t-b" x="210" y="400" text-anchor="middle">runner process</text>
+        <text class="t-s" x="210" y="417" text-anchor="middle">spawn · daemon · holds MLX</text>
+        <rect class="s-ten" x="316" y="378" width="180" height="60" rx="3"/>
+        <text class="t-b" x="406" y="400" text-anchor="middle">runner process</text>
+        <text class="t-s" x="406" y="417" text-anchor="middle">one per placed instance</text>
+        <rect class="s-box" x="520" y="378" width="180" height="60" rx="3" stroke-dasharray="4 4"/>
+        <text class="t-s" x="610" y="405" text-anchor="middle">…</text>
+        <text class="t-s" x="610" y="422" text-anchor="middle">single-threaded inference</text>
+        <text class="t-s" x="720" y="412">model weights live only here,</text>
+        <text class="t-s" x="720" y="426">never in the node process</text>
+      
+</svg>

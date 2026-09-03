@@ -1,0 +1,102 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1040 452" width="1040" height="452" role="img" aria-label="Three separate networks connect the same three exo nodes: a control plane broadcasting JSON over zenoh to all nodes, a tensor plane sending activations only between ring neighbours over MLX distributed, and a weights plane in which each node independently pulls the full model repository from huggingface.co over HTTPS.">
+<title>Three separate networks connect the same three exo nodes: a control plane broadcasting JSON over zenoh to all nodes, a tensor plane sending activations only between ring neighbours over MLX distributed, and a weights plane in which each node independently pulls the full model repository from huggingface.co over HTTPS.</title>
+<style>
+  :root{
+    --surface:#FFFFFF; --surface-2:#EEF0F7; --ink:#14161C; --ink-2:#3A4052;
+    --muted:#666E85; --rule-2:#C3C9DA;
+    --ctl:#3F51C4; --ten:#B84A18; --wts:#1B7565; --warn:#9A2F2F;
+    --ctl-wash:#E7EAFA; --ten-wash:#FBEAE1; --wts-wash:#E1F1ED; --warn-wash:#F8E8E8;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --surface:#171A22; --surface-2:#1F2330; --ink:#E8EAF1; --ink-2:#C2C7D6;
+      --muted:#959CB0; --rule-2:#3A4152;
+      --ctl:#8D9AF2; --ten:#F0864F; --wts:#4FC3AA; --warn:#EE8A8A;
+      --ctl-wash:#1C2140; --ten-wash:#332014; --wts-wash:#132C28; --warn-wash:#331A1A;
+    }
+  }
+  .s-box{fill:var(--surface); stroke:var(--rule-2); stroke-width:1.3}
+  .s-box2{fill:var(--surface-2); stroke:var(--rule-2); stroke-width:1.3}
+  .s-ctl{fill:var(--ctl-wash); stroke:var(--ctl); stroke-width:1.3}
+  .s-ten{fill:var(--ten-wash); stroke:var(--ten); stroke-width:1.3}
+  .s-wts{fill:var(--wts-wash); stroke:var(--wts); stroke-width:1.3}
+  .s-warn{fill:var(--warn-wash); stroke:var(--warn); stroke-width:1.3}
+  .ln{stroke:var(--rule-2); stroke-width:1.3; fill:none}
+  .ln-ctl{stroke:var(--ctl); stroke-width:1.6; fill:none}
+  .ln-ten{stroke:var(--ten); stroke-width:1.6; fill:none}
+  .ln-wts{stroke:var(--wts); stroke-width:1.6; fill:none}
+  .dash{stroke-dasharray:5 4}
+  .t{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:11px; fill:var(--ink-2)}
+  .t-s{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:9.5px; fill:var(--muted)}
+  .t-b{font-family:system-ui,-apple-system,"Segoe UI",sans-serif; font-size:12.5px; font-weight:600; fill:var(--ink)}
+  .t-h{font-family:system-ui,-apple-system,"Segoe UI",sans-serif; font-size:13.5px; font-weight:700; fill:var(--ink)}
+  .t-ctl{fill:var(--ctl)} .t-ten{fill:var(--ten)} .t-wts{fill:var(--wts)} .t-warn{fill:var(--warn)}
+  .m-ctl{fill:var(--ctl)} .m-ten{fill:var(--ten)} .m-wts{fill:var(--wts)} .m-n{fill:var(--rule-2)}
+</style>
+<defs>
+  <marker id="a-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" class="m-n"/></marker>
+  <marker id="a-ctl" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" class="m-ctl"/></marker>
+  <marker id="a-ten" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" class="m-ten"/></marker>
+  <marker id="a-wts" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" class="m-wts"/></marker>
+</defs>
+
+        <!-- ░░ row 1 : control ░░ -->
+        <text class="t-h t-ctl" x="20" y="40">Control plane</text>
+        <text class="t-s" x="20" y="58">zenoh pub/sub · TCP :52414</text>
+        <text class="t-s" x="20" y="72">JSON, camelCase</text>
+        <text class="t-s" x="20" y="90">events · commands · ballots</text>
+        <text class="t-s" x="20" y="104">telemetry · every token</text>
+
+        <rect class="s-ctl" x="330" y="34" width="118" height="42" rx="3"/>
+        <text class="t t-ctl" x="389" y="60" text-anchor="middle">node A</text>
+        <rect class="s-ctl" x="530" y="34" width="118" height="42" rx="3"/>
+        <text class="t t-ctl" x="589" y="60" text-anchor="middle">node B</text>
+        <rect class="s-ctl" x="730" y="34" width="118" height="42" rx="3"/>
+        <text class="t t-ctl" x="789" y="60" text-anchor="middle">node C</text>
+        <path class="ln-ctl" d="M389 76 V100 M589 76 V100 M789 76 V100"/>
+        <path class="ln-ctl" d="M330 100 H900"/>
+        <circle cx="389" cy="100" r="3.4" class="m-ctl"/><circle cx="589" cy="100" r="3.4" class="m-ctl"/><circle cx="789" cy="100" r="3.4" class="m-ctl"/>
+        <text class="t-s t-ctl" x="908" y="104">broadcast to all peers</text>
+
+        <path class="ln dash" d="M20 128 H1020" opacity=".7"/>
+
+        <!-- ░░ row 2 : tensor ░░ -->
+        <text class="t-h t-ten" x="20" y="176">Tensor plane</text>
+        <text class="t-s" x="20" y="194">MLX distributed collectives</text>
+        <text class="t-s" x="20" y="208">ring (TCP) or jaccl (RDMA)</text>
+        <text class="t-s" x="20" y="226">layer activations, per token</text>
+
+        <rect class="s-ten" x="330" y="170" width="118" height="42" rx="3"/>
+        <text class="t t-ten" x="389" y="196" text-anchor="middle">rank 0</text>
+        <rect class="s-ten" x="530" y="170" width="118" height="42" rx="3"/>
+        <text class="t t-ten" x="589" y="196" text-anchor="middle">rank 1</text>
+        <rect class="s-ten" x="730" y="170" width="118" height="42" rx="3"/>
+        <text class="t t-ten" x="789" y="196" text-anchor="middle">rank 2</text>
+        <path class="ln-ten" d="M448 191 H524" marker-end="url(#a-ten)"/>
+        <path class="ln-ten" d="M648 191 H724" marker-end="url(#a-ten)"/>
+        <path class="ln-ten" d="M789 212 V240 H389 V212" marker-end="url(#a-ten)"/>
+        <text class="t-s t-ten" x="908" y="195">ring neighbours only</text>
+        <text class="t-s" x="588" y="255" text-anchor="middle">a rank dials only its left and right neighbour</text>
+
+        <path class="ln dash" d="M20 278 H1020" opacity=".7"/>
+
+        <!-- ░░ row 3 : weights ░░ -->
+        <text class="t-h t-wts" x="20" y="326">Weights plane</text>
+        <text class="t-s" x="20" y="344">plain HTTPS</text>
+        <text class="t-s" x="20" y="358">huggingface.co</text>
+        <text class="t-s" x="20" y="376">safetensors, config, tokenizer</text>
+
+        <rect class="s-wts" x="330" y="320" width="118" height="42" rx="3"/>
+        <text class="t t-wts" x="389" y="346" text-anchor="middle">node A</text>
+        <rect class="s-wts" x="530" y="320" width="118" height="42" rx="3"/>
+        <text class="t t-wts" x="589" y="346" text-anchor="middle">node B</text>
+        <rect class="s-wts" x="730" y="320" width="118" height="42" rx="3"/>
+        <text class="t t-wts" x="789" y="346" text-anchor="middle">node C</text>
+        <rect class="s-box" x="880" y="320" width="140" height="42" rx="3"/>
+        <text class="t" x="950" y="346" text-anchor="middle">huggingface.co</text>
+        <path class="ln-wts" d="M848 341 H872" marker-end="url(#a-wts)"/>
+        <path class="ln-wts" d="M589 362 V390 H952 V368" marker-end="url(#a-wts)"/>
+        <path class="ln-wts" d="M389 362 V412 H918 V368" marker-end="url(#a-wts)"/>
+        <text class="t-s" x="480" y="436" text-anchor="middle">every node pulls the FULL repository independently — there is no peer-to-peer relay</text>
+      
+</svg>

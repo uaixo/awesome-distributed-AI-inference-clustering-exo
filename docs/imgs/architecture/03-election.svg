@@ -1,0 +1,82 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 372" width="960" height="372" role="img" aria-label="Comparison of two election outcomes. When a worker joins or leaves, the incumbent master re-proposes its existing session and wins, so nothing is torn down. When the master itself dies, no survivor holds its session, every node proposes a new one, and the entire cluster state is discarded.">
+<title>Comparison of two election outcomes. When a worker joins or leaves, the incumbent master re-proposes its existing session and wins, so nothing is torn down. When the master itself dies, no survivor holds its session, every node proposes a new one, and the entire cluster state is discarded.</title>
+<style>
+  :root{
+    --surface:#FFFFFF; --surface-2:#EEF0F7; --ink:#14161C; --ink-2:#3A4052;
+    --muted:#666E85; --rule-2:#C3C9DA;
+    --ctl:#3F51C4; --ten:#B84A18; --wts:#1B7565; --warn:#9A2F2F;
+    --ctl-wash:#E7EAFA; --ten-wash:#FBEAE1; --wts-wash:#E1F1ED; --warn-wash:#F8E8E8;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --surface:#171A22; --surface-2:#1F2330; --ink:#E8EAF1; --ink-2:#C2C7D6;
+      --muted:#959CB0; --rule-2:#3A4152;
+      --ctl:#8D9AF2; --ten:#F0864F; --wts:#4FC3AA; --warn:#EE8A8A;
+      --ctl-wash:#1C2140; --ten-wash:#332014; --wts-wash:#132C28; --warn-wash:#331A1A;
+    }
+  }
+  .s-box{fill:var(--surface); stroke:var(--rule-2); stroke-width:1.3}
+  .s-box2{fill:var(--surface-2); stroke:var(--rule-2); stroke-width:1.3}
+  .s-ctl{fill:var(--ctl-wash); stroke:var(--ctl); stroke-width:1.3}
+  .s-ten{fill:var(--ten-wash); stroke:var(--ten); stroke-width:1.3}
+  .s-wts{fill:var(--wts-wash); stroke:var(--wts); stroke-width:1.3}
+  .s-warn{fill:var(--warn-wash); stroke:var(--warn); stroke-width:1.3}
+  .ln{stroke:var(--rule-2); stroke-width:1.3; fill:none}
+  .ln-ctl{stroke:var(--ctl); stroke-width:1.6; fill:none}
+  .ln-ten{stroke:var(--ten); stroke-width:1.6; fill:none}
+  .ln-wts{stroke:var(--wts); stroke-width:1.6; fill:none}
+  .dash{stroke-dasharray:5 4}
+  .t{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:11px; fill:var(--ink-2)}
+  .t-s{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:9.5px; fill:var(--muted)}
+  .t-b{font-family:system-ui,-apple-system,"Segoe UI",sans-serif; font-size:12.5px; font-weight:600; fill:var(--ink)}
+  .t-h{font-family:system-ui,-apple-system,"Segoe UI",sans-serif; font-size:13.5px; font-weight:700; fill:var(--ink)}
+  .t-ctl{fill:var(--ctl)} .t-ten{fill:var(--ten)} .t-wts{fill:var(--wts)} .t-warn{fill:var(--warn)}
+  .m-ctl{fill:var(--ctl)} .m-ten{fill:var(--ten)} .m-wts{fill:var(--wts)} .m-n{fill:var(--rule-2)}
+</style>
+<defs>
+  <marker id="a-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" class="m-n"/></marker>
+  <marker id="a-ctl" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" class="m-ctl"/></marker>
+  <marker id="a-ten" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" class="m-ten"/></marker>
+  <marker id="a-wts" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" class="m-wts"/></marker>
+</defs>
+
+        <!-- shared trigger -->
+        <rect class="s-box" x="186" y="20" width="588" height="42" rx="3"/>
+        <text class="t" x="480" y="40" text-anchor="middle">zenoh liveliness change → ConnectionMessage(bool) — peer identity already discarded</text>
+        <text class="t-s" x="480" y="55" text-anchor="middle">200 ms debounce · clock += 1 · 3.0 s campaign · API stops accepting commands</text>
+        <path class="ln" d="M330 62 V92" marker-end="url(#a-n)"/>
+        <path class="ln" d="M630 62 V92" marker-end="url(#a-n)"/>
+
+        <!-- LEFT -->
+        <rect class="s-box2" x="20" y="92" width="450" height="256" rx="4"/>
+        <text class="t-h" x="40" y="118">A worker joins or leaves</text>
+        <rect class="s-ctl" x="40" y="134" width="410" height="40" rx="3"/>
+        <text class="t" x="245" y="152" text-anchor="middle">incumbent re-proposes its EXISTING SessionId</text>
+        <text class="t-s" x="245" y="166" text-anchor="middle">wins on seniority — session clock is not part of the comparison</text>
+        <path class="ln-ctl" d="M245 174 V196" marker-end="url(#a-ctl)"/>
+        <rect class="s-ctl" x="40" y="198" width="410" height="30" rx="3"/>
+        <text class="t" x="245" y="218" text-anchor="middle">is_new_master = false</text>
+        <path class="ln-ctl" d="M245 228 V250" marker-end="url(#a-ctl)"/>
+        <rect class="s-box" x="40" y="252" width="410" height="80" rx="3"/>
+        <text class="t-b" x="60" y="274">Nothing is torn down.</text>
+        <text class="t-s" x="60" y="292">Master, EventRouter, Worker, downloads, every runner</text>
+        <text class="t-s" x="60" y="307">and every loaded model keep running untouched.</text>
+        <text class="t-s" x="60" y="322">Cost: a ~3 s pause on new requests.</text>
+
+        <!-- RIGHT -->
+        <rect class="s-box2" x="490" y="92" width="450" height="256" rx="4"/>
+        <text class="t-h" x="510" y="118">The master dies</text>
+        <rect class="s-warn" x="510" y="134" width="410" height="40" rx="3"/>
+        <text class="t" x="715" y="152" text-anchor="middle">no survivor holds that session — all propose a NEW one</text>
+        <text class="t-s" x="715" y="166" text-anchor="middle">there is no master lease and no master heartbeat anywhere</text>
+        <path class="ln-ten" d="M715 174 V196" marker-end="url(#a-ten)"/>
+        <rect class="s-warn" x="510" y="198" width="410" height="30" rx="3"/>
+        <text class="t t-warn" x="715" y="218" text-anchor="middle">is_new_master = true, on every node</text>
+        <path class="ln-ten" d="M715 228 V250" marker-end="url(#a-ten)"/>
+        <rect class="s-warn" x="510" y="252" width="410" height="80" rx="3"/>
+        <text class="t-b t-warn" x="530" y="274">The whole cluster is wiped.</text>
+        <text class="t-s" x="530" y="292">New master starts from an empty State; its disk log is rotated</text>
+        <text class="t-s" x="530" y="307">and the global index restarts at 0. Every node rebuilds its</text>
+        <text class="t-s" x="530" y="322">Worker, which kills every runner. All models must be re-placed.</text>
+      
+</svg>

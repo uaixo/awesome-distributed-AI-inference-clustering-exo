@@ -1,0 +1,126 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 472" width="980" height="472" role="img" aria-label="Side-by-side comparison of pipeline and tensor parallelism. Under pipeline parallelism each rank keeps a contiguous slice of decoder layers and passes activations to the next rank, with an all-gather at the end of decode. Under tensor parallelism every rank keeps all layers but each weight matrix is split, requiring two all-reduces per dense layer per token.">
+<title>Side-by-side comparison of pipeline and tensor parallelism. Under pipeline parallelism each rank keeps a contiguous slice of decoder layers and passes activations to the next rank, with an all-gather at the end of decode. Under tensor parallelism every rank keeps all layers but each weight matrix is split, requiring two all-reduces per dense layer per token.</title>
+<style>
+  :root{
+    --surface:#FFFFFF; --surface-2:#EEF0F7; --ink:#14161C; --ink-2:#3A4052;
+    --muted:#666E85; --rule-2:#C3C9DA;
+    --ctl:#3F51C4; --ten:#B84A18; --wts:#1B7565; --warn:#9A2F2F;
+    --ctl-wash:#E7EAFA; --ten-wash:#FBEAE1; --wts-wash:#E1F1ED; --warn-wash:#F8E8E8;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --surface:#171A22; --surface-2:#1F2330; --ink:#E8EAF1; --ink-2:#C2C7D6;
+      --muted:#959CB0; --rule-2:#3A4152;
+      --ctl:#8D9AF2; --ten:#F0864F; --wts:#4FC3AA; --warn:#EE8A8A;
+      --ctl-wash:#1C2140; --ten-wash:#332014; --wts-wash:#132C28; --warn-wash:#331A1A;
+    }
+  }
+  .s-box{fill:var(--surface); stroke:var(--rule-2); stroke-width:1.3}
+  .s-box2{fill:var(--surface-2); stroke:var(--rule-2); stroke-width:1.3}
+  .s-ctl{fill:var(--ctl-wash); stroke:var(--ctl); stroke-width:1.3}
+  .s-ten{fill:var(--ten-wash); stroke:var(--ten); stroke-width:1.3}
+  .s-wts{fill:var(--wts-wash); stroke:var(--wts); stroke-width:1.3}
+  .s-warn{fill:var(--warn-wash); stroke:var(--warn); stroke-width:1.3}
+  .ln{stroke:var(--rule-2); stroke-width:1.3; fill:none}
+  .ln-ctl{stroke:var(--ctl); stroke-width:1.6; fill:none}
+  .ln-ten{stroke:var(--ten); stroke-width:1.6; fill:none}
+  .ln-wts{stroke:var(--wts); stroke-width:1.6; fill:none}
+  .dash{stroke-dasharray:5 4}
+  .t{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:11px; fill:var(--ink-2)}
+  .t-s{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:9.5px; fill:var(--muted)}
+  .t-b{font-family:system-ui,-apple-system,"Segoe UI",sans-serif; font-size:12.5px; font-weight:600; fill:var(--ink)}
+  .t-h{font-family:system-ui,-apple-system,"Segoe UI",sans-serif; font-size:13.5px; font-weight:700; fill:var(--ink)}
+  .t-ctl{fill:var(--ctl)} .t-ten{fill:var(--ten)} .t-wts{fill:var(--wts)} .t-warn{fill:var(--warn)}
+  .m-ctl{fill:var(--ctl)} .m-ten{fill:var(--ten)} .m-wts{fill:var(--wts)} .m-n{fill:var(--rule-2)}
+</style>
+<defs>
+  <marker id="a-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" class="m-n"/></marker>
+  <marker id="a-ctl" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" class="m-ctl"/></marker>
+  <marker id="a-ten" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" class="m-ten"/></marker>
+  <marker id="a-wts" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" class="m-wts"/></marker>
+</defs>
+
+        <!-- LEFT PANEL -->
+        <rect class="s-box2" x="16" y="20" width="466" height="360" rx="4"/>
+        <text class="t-h" x="36" y="46">Pipeline parallel</text>
+        <text class="t-s" x="36" y="63">contiguous layer ranges · one hop per token</text>
+
+        <!-- rank columns -->
+        <rect class="s-box" x="44" y="82" width="120" height="196" rx="3"/>
+        <text class="t-s" x="104" y="99" text-anchor="middle">rank 0</text>
+        <rect class="s-box2" x="54" y="108" width="100" height="26" rx="2"/><text class="t-s" x="104" y="125" text-anchor="middle">embed</text>
+        <rect class="s-ten" x="54" y="140" width="100" height="80" rx="2"/><text class="t" x="104" y="176" text-anchor="middle">layers</text><text class="t-s" x="104" y="192" text-anchor="middle">0 … 11</text>
+        <rect class="s-box2" x="54" y="226" width="100" height="40" rx="2"/><text class="t-s" x="104" y="243" text-anchor="middle">norm +</text><text class="t-s" x="104" y="257" text-anchor="middle">lm_head</text>
+
+        <rect class="s-box" x="192" y="82" width="120" height="196" rx="3"/>
+        <text class="t-s" x="252" y="99" text-anchor="middle">rank 1</text>
+        <rect class="s-box2" x="202" y="108" width="100" height="26" rx="2"/><text class="t-s" x="252" y="125" text-anchor="middle">embed</text>
+        <rect class="s-ten" x="202" y="140" width="100" height="80" rx="2"/><text class="t" x="252" y="176" text-anchor="middle">layers</text><text class="t-s" x="252" y="192" text-anchor="middle">12 … 23</text>
+        <rect class="s-box2" x="202" y="226" width="100" height="40" rx="2"/><text class="t-s" x="252" y="243" text-anchor="middle">norm +</text><text class="t-s" x="252" y="257" text-anchor="middle">lm_head</text>
+
+        <rect class="s-box" x="340" y="82" width="120" height="196" rx="3"/>
+        <text class="t-s" x="400" y="99" text-anchor="middle">rank 2</text>
+        <rect class="s-box2" x="350" y="108" width="100" height="26" rx="2"/><text class="t-s" x="400" y="125" text-anchor="middle">embed</text>
+        <rect class="s-ten" x="350" y="140" width="100" height="80" rx="2"/><text class="t" x="400" y="176" text-anchor="middle">layers</text><text class="t-s" x="400" y="192" text-anchor="middle">24 … 35</text>
+        <rect class="s-box2" x="350" y="226" width="100" height="40" rx="2"/><text class="t-s" x="400" y="243" text-anchor="middle">norm +</text><text class="t-s" x="400" y="257" text-anchor="middle">lm_head</text>
+
+        <path class="ln-ten" d="M164 180 H186" marker-end="url(#a-ten)"/>
+        <path class="ln-ten" d="M312 180 H334" marker-end="url(#a-ten)"/>
+
+        <path class="ln-ten dash" d="M400 290 V304 H104 V282" marker-end="url(#a-ten)"/>
+        <path class="ln-ten dash" d="M252 304 V282" marker-end="url(#a-ten)"/>
+        <path class="ln-ten" d="M400 278 V290"/>
+        <path class="ln-ten" d="M36 322 H54" marker-end="url(#a-ten)"/>
+        <text class="t-s t-ten" x="62" y="326">send / recv_like — one dense [B, 1, hidden] tensor per hop</text>
+        <path class="ln-ten dash" d="M36 340 H54" marker-end="url(#a-ten)"/>
+        <text class="t-s t-ten" x="62" y="344">all_gather[−B:] on decode — every rank ends with rank 2's state</text>
+        <text class="t-s" x="36" y="366">grey blocks are replicated: each rank holds a full embedding and head</text>
+
+        <!-- RIGHT PANEL -->
+        <rect class="s-box2" x="498" y="20" width="466" height="360" rx="4"/>
+        <text class="t-h" x="518" y="46">Tensor parallel</text>
+        <text class="t-s" x="518" y="63">every layer on every rank, every matrix cut</text>
+
+        <rect class="s-box" x="526" y="82" width="120" height="196" rx="3"/>
+        <text class="t-s" x="586" y="99" text-anchor="middle">rank 0</text>
+        <rect class="s-box" x="674" y="82" width="120" height="196" rx="3"/>
+        <text class="t-s" x="734" y="99" text-anchor="middle">rank 1</text>
+        <rect class="s-box" x="822" y="82" width="120" height="196" rx="3"/>
+        <text class="t-s" x="882" y="99" text-anchor="middle">rank 2</text>
+
+        <!-- layer internals, repeated -->
+        <g>
+          <rect class="s-ten" x="536" y="112" width="100" height="22" rx="2"/><text class="t-s" x="586" y="127" text-anchor="middle">q k v · ⅟N</text>
+          <rect class="s-ten" x="684" y="112" width="100" height="22" rx="2"/><text class="t-s" x="734" y="127" text-anchor="middle">q k v · ⅟N</text>
+          <rect class="s-ten" x="832" y="112" width="100" height="22" rx="2"/><text class="t-s" x="882" y="127" text-anchor="middle">q k v · ⅟N</text>
+          <rect class="s-box2" x="536" y="140" width="100" height="20" rx="2"/><text class="t-s" x="586" y="154" text-anchor="middle">o_proj</text>
+          <rect class="s-box2" x="684" y="140" width="100" height="20" rx="2"/><text class="t-s" x="734" y="154" text-anchor="middle">o_proj</text>
+          <rect class="s-box2" x="832" y="140" width="100" height="20" rx="2"/><text class="t-s" x="882" y="154" text-anchor="middle">o_proj</text>
+        </g>
+        <path class="ln-ten" d="M520 170 H950" stroke-width="2.4"/>
+        <circle cx="586" cy="170" r="3.6" class="m-ten"/><circle cx="734" cy="170" r="3.6" class="m-ten"/><circle cx="882" cy="170" r="3.6" class="m-ten"/>
+        <text class="t-s t-ten" x="520" y="184">all-reduce</text>
+
+        <g>
+          <rect class="s-ten" x="536" y="192" width="100" height="22" rx="2"/><text class="t-s" x="586" y="207" text-anchor="middle">gate up · ⅟N</text>
+          <rect class="s-ten" x="684" y="192" width="100" height="22" rx="2"/><text class="t-s" x="734" y="207" text-anchor="middle">gate up · ⅟N</text>
+          <rect class="s-ten" x="832" y="192" width="100" height="22" rx="2"/><text class="t-s" x="882" y="207" text-anchor="middle">gate up · ⅟N</text>
+          <rect class="s-box2" x="536" y="220" width="100" height="20" rx="2"/><text class="t-s" x="586" y="234" text-anchor="middle">down_proj</text>
+          <rect class="s-box2" x="684" y="220" width="100" height="20" rx="2"/><text class="t-s" x="734" y="234" text-anchor="middle">down_proj</text>
+          <rect class="s-box2" x="832" y="220" width="100" height="20" rx="2"/><text class="t-s" x="882" y="234" text-anchor="middle">down_proj</text>
+        </g>
+        <path class="ln-ten" d="M520 250 H950" stroke-width="2.4"/>
+        <circle cx="586" cy="250" r="3.6" class="m-ten"/><circle cx="734" cy="250" r="3.6" class="m-ten"/><circle cx="882" cy="250" r="3.6" class="m-ten"/>
+        <text class="t-s t-ten" x="520" y="264">all-reduce</text>
+
+        <text class="t-s t-ten" x="518" y="326">two all-reduces per dense layer per token, plus one per MoE block</text>
+        <text class="t-s t-ten" x="518" y="344">nothing at all travels between layers — only inside them</text>
+        <text class="t-s" x="518" y="366">embedding, final norm and lm_head are never sharded on either side</text>
+
+        <!-- shared bottom -->
+        <rect class="s-box" x="16" y="392" width="948" height="62" rx="4"/>
+        <text class="t-b" x="36" y="414">One mx.distributed.Group underneath both</text>
+        <text class="t-s" x="36" y="432">backend="ring" — TCP hostfile, dials only its two neighbours   ·   backend="jaccl" — RDMA over Thunderbolt 5, needs an all-to-all mesh</text>
+        <text class="t-s" x="36" y="447">Every rank samples locally from identical logits with the same seed; no token crosses the wire, and only rank 0's copy leaves the process.</text>
+      
+</svg>

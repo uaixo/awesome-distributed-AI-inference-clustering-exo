@@ -1,0 +1,89 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 660 490" width="660" height="490" role="img" aria-label="A funnel of placement filters narrowing from all simple cycles in the topology graph down through minimum node count, aggregate memory, sharding shape divisibility, backend intersection and RDMA connectivity, to a final selection rule, producing either a ring instance or a jaccl RDMA instance.">
+<title>A funnel of placement filters narrowing from all simple cycles in the topology graph down through minimum node count, aggregate memory, sharding shape divisibility, backend intersection and RDMA connectivity, to a final selection rule, producing either a ring instance or a jaccl RDMA instance.</title>
+<style>
+  :root{
+    --surface:#FFFFFF; --surface-2:#EEF0F7; --ink:#14161C; --ink-2:#3A4052;
+    --muted:#666E85; --rule-2:#C3C9DA;
+    --ctl:#3F51C4; --ten:#B84A18; --wts:#1B7565; --warn:#9A2F2F;
+    --ctl-wash:#E7EAFA; --ten-wash:#FBEAE1; --wts-wash:#E1F1ED; --warn-wash:#F8E8E8;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --surface:#171A22; --surface-2:#1F2330; --ink:#E8EAF1; --ink-2:#C2C7D6;
+      --muted:#959CB0; --rule-2:#3A4152;
+      --ctl:#8D9AF2; --ten:#F0864F; --wts:#4FC3AA; --warn:#EE8A8A;
+      --ctl-wash:#1C2140; --ten-wash:#332014; --wts-wash:#132C28; --warn-wash:#331A1A;
+    }
+  }
+  .s-box{fill:var(--surface); stroke:var(--rule-2); stroke-width:1.3}
+  .s-box2{fill:var(--surface-2); stroke:var(--rule-2); stroke-width:1.3}
+  .s-ctl{fill:var(--ctl-wash); stroke:var(--ctl); stroke-width:1.3}
+  .s-ten{fill:var(--ten-wash); stroke:var(--ten); stroke-width:1.3}
+  .s-wts{fill:var(--wts-wash); stroke:var(--wts); stroke-width:1.3}
+  .s-warn{fill:var(--warn-wash); stroke:var(--warn); stroke-width:1.3}
+  .ln{stroke:var(--rule-2); stroke-width:1.3; fill:none}
+  .ln-ctl{stroke:var(--ctl); stroke-width:1.6; fill:none}
+  .ln-ten{stroke:var(--ten); stroke-width:1.6; fill:none}
+  .ln-wts{stroke:var(--wts); stroke-width:1.6; fill:none}
+  .dash{stroke-dasharray:5 4}
+  .t{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:11px; fill:var(--ink-2)}
+  .t-s{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:9.5px; fill:var(--muted)}
+  .t-b{font-family:system-ui,-apple-system,"Segoe UI",sans-serif; font-size:12.5px; font-weight:600; fill:var(--ink)}
+  .t-h{font-family:system-ui,-apple-system,"Segoe UI",sans-serif; font-size:13.5px; font-weight:700; fill:var(--ink)}
+  .t-ctl{fill:var(--ctl)} .t-ten{fill:var(--ten)} .t-wts{fill:var(--wts)} .t-warn{fill:var(--warn)}
+  .m-ctl{fill:var(--ctl)} .m-ten{fill:var(--ten)} .m-wts{fill:var(--wts)} .m-n{fill:var(--rule-2)}
+</style>
+<defs>
+  <marker id="a-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" class="m-n"/></marker>
+  <marker id="a-ctl" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" class="m-ctl"/></marker>
+  <marker id="a-ten" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" class="m-ten"/></marker>
+  <marker id="a-wts" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" class="m-wts"/></marker>
+</defs>
+
+        <rect class="s-box" x="70" y="24" width="520" height="38" rx="3"/>
+        <text class="t" x="330" y="43" text-anchor="middle">all simple cycles of the topology graph + one singleton per node</text>
+        <text class="t-s" x="330" y="56" text-anchor="middle">edges exist only where a node verified a peer's identity over HTTP</text>
+        <path class="ln" d="M330 62 V70"/>
+
+        <rect class="s-box" x="95" y="72" width="470" height="34" rx="3"/>
+        <text class="t" x="330" y="93" text-anchor="middle">len(cycle) ≥ min_nodes</text>
+        <path class="ln" d="M330 106 V114"/>
+
+        <rect class="s-box" x="120" y="116" width="420" height="34" rx="3"/>
+        <text class="t" x="330" y="137" text-anchor="middle">Σ ram_available ≥ model storage_size</text>
+        <path class="ln" d="M330 150 V158"/>
+
+        <rect class="s-box" x="145" y="160" width="370" height="42" rx="3"/>
+        <text class="t" x="330" y="178" text-anchor="middle">sharding shape is divisible</text>
+        <text class="t-s" x="330" y="193" text-anchor="middle">tensor needs hidden_size % N and kv_heads % N</text>
+        <path class="ln" d="M330 202 V210"/>
+
+        <rect class="s-box" x="170" y="212" width="320" height="34" rx="3"/>
+        <text class="t" x="330" y="233" text-anchor="middle">backend intersection — Metal / Cuda / Cpu</text>
+        <path class="ln" d="M330 246 V254"/>
+
+        <rect class="s-box" x="195" y="256" width="270" height="42" rx="3"/>
+        <text class="t" x="330" y="274" text-anchor="middle">RDMA cycle + rdma_ctl enabled</text>
+        <text class="t-s" x="330" y="289" text-anchor="middle">jaccl backend only</text>
+        <path class="ln" d="M330 298 V306"/>
+
+        <rect class="s-ctl" x="150" y="308" width="360" height="58" rx="3"/>
+        <text class="t-b" x="330" y="328" text-anchor="middle">selection</text>
+        <text class="t-s" x="330" y="344" text-anchor="middle">smallest surviving cycles → prefer one containing a leaf</text>
+        <text class="t-s" x="330" y="358" text-anchor="middle">→ argmax( Σ download warmth , Σ free RAM )</text>
+
+        <path class="ln-ctl" d="M250 366 V392" marker-end="url(#a-ctl)"/>
+        <path class="ln-ctl" d="M410 366 V392" marker-end="url(#a-ctl)"/>
+        <rect class="s-ten" x="70" y="394" width="230" height="62" rx="3"/>
+        <text class="t-b" x="185" y="414" text-anchor="middle">MlxRingInstance</text>
+        <text class="t-s" x="185" y="430" text-anchor="middle">per-rank hostfile: 0.0.0.0 for self,</text>
+        <text class="t-s" x="185" y="444" text-anchor="middle">neighbours real, others placeholder</text>
+        <rect class="s-ten" x="330" y="394" width="230" height="62" rx="3"/>
+        <text class="t-b" x="445" y="414" text-anchor="middle">MlxJacclInstance</text>
+        <text class="t-s" x="445" y="430" text-anchor="middle">N×N RDMA device-name matrix</text>
+        <text class="t-s" x="445" y="444" text-anchor="middle">+ rank-0 coordinator address</text>
+
+        <text class="t-s" x="600" y="337">↖ download warmth</text>
+        <text class="t-s" x="600" y="351">beats free RAM</text>
+      
+</svg>

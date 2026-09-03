@@ -1,0 +1,101 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 420" width="1120" height="420" role="img" aria-label="Swimlane sequence for one streaming chat completion. The request travels down from the HTTP client through the API, the elected master and every worker to the runner processes; the generated chunk then travels back up the same lanes. The four return hops — chunk to worker, worker to master, master to API, API to client — repeat for every single token.">
+<title>Swimlane sequence for one streaming chat completion. The request travels down from the HTTP client through the API, the elected master and every worker to the runner processes; the generated chunk then travels back up the same lanes. The four return hops — chunk to worker, worker to master, master to API, API to client — repeat for every single token.</title>
+<style>
+  :root{
+    --surface:#FFFFFF; --surface-2:#EEF0F7; --ink:#14161C; --ink-2:#3A4052;
+    --muted:#666E85; --rule-2:#C3C9DA;
+    --ctl:#3F51C4; --ten:#B84A18; --wts:#1B7565; --warn:#9A2F2F;
+    --ctl-wash:#E7EAFA; --ten-wash:#FBEAE1; --wts-wash:#E1F1ED; --warn-wash:#F8E8E8;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --surface:#171A22; --surface-2:#1F2330; --ink:#E8EAF1; --ink-2:#C2C7D6;
+      --muted:#959CB0; --rule-2:#3A4152;
+      --ctl:#8D9AF2; --ten:#F0864F; --wts:#4FC3AA; --warn:#EE8A8A;
+      --ctl-wash:#1C2140; --ten-wash:#332014; --wts-wash:#132C28; --warn-wash:#331A1A;
+    }
+  }
+  .s-box{fill:var(--surface); stroke:var(--rule-2); stroke-width:1.3}
+  .s-box2{fill:var(--surface-2); stroke:var(--rule-2); stroke-width:1.3}
+  .s-ctl{fill:var(--ctl-wash); stroke:var(--ctl); stroke-width:1.3}
+  .s-ten{fill:var(--ten-wash); stroke:var(--ten); stroke-width:1.3}
+  .s-wts{fill:var(--wts-wash); stroke:var(--wts); stroke-width:1.3}
+  .s-warn{fill:var(--warn-wash); stroke:var(--warn); stroke-width:1.3}
+  .ln{stroke:var(--rule-2); stroke-width:1.3; fill:none}
+  .ln-ctl{stroke:var(--ctl); stroke-width:1.6; fill:none}
+  .ln-ten{stroke:var(--ten); stroke-width:1.6; fill:none}
+  .ln-wts{stroke:var(--wts); stroke-width:1.6; fill:none}
+  .dash{stroke-dasharray:5 4}
+  .t{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:11px; fill:var(--ink-2)}
+  .t-s{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:9.5px; fill:var(--muted)}
+  .t-b{font-family:system-ui,-apple-system,"Segoe UI",sans-serif; font-size:12.5px; font-weight:600; fill:var(--ink)}
+  .t-h{font-family:system-ui,-apple-system,"Segoe UI",sans-serif; font-size:13.5px; font-weight:700; fill:var(--ink)}
+  .t-ctl{fill:var(--ctl)} .t-ten{fill:var(--ten)} .t-wts{fill:var(--wts)} .t-warn{fill:var(--warn)}
+  .m-ctl{fill:var(--ctl)} .m-ten{fill:var(--ten)} .m-wts{fill:var(--wts)} .m-n{fill:var(--rule-2)}
+</style>
+<defs>
+  <marker id="a-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" class="m-n"/></marker>
+  <marker id="a-ctl" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" class="m-ctl"/></marker>
+  <marker id="a-ten" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" class="m-ten"/></marker>
+  <marker id="a-wts" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" class="m-wts"/></marker>
+</defs>
+
+        <!-- lanes -->
+        <text class="t-b" x="14" y="60">Client</text>
+        <text class="t-b" x="14" y="118">API</text>
+        <text class="t-b" x="14" y="176">Master</text>
+        <text class="t-b" x="14" y="234">Worker × N</text>
+        <text class="t-b" x="14" y="292">Runners</text>
+        <path class="ln dash" d="M108 55 H1108 M108 113 H1108 M108 171 H1108 M108 229 H1108 M108 287 H1108" opacity=".5"/>
+        <text class="t-s t-ctl" x="150" y="20">request →</text>
+        <text class="t-s t-ten" x="900" y="20">← every token</text>
+        <path class="ln dash" d="M866 12 V400" opacity=".45"/>
+
+        <!-- forward -->
+        <path class="ln-ctl" d="M150 55 V107" marker-end="url(#a-ctl)"/>
+        <text class="t-s" x="150" y="34" text-anchor="middle">POST /v1/chat</text>
+        <text class="t-s" x="150" y="46" text-anchor="middle">/completions</text>
+
+        <rect class="s-ctl" x="182" y="94" width="164" height="36" rx="3"/>
+        <text class="t-s" x="264" y="110" text-anchor="middle">adapter → one internal</text>
+        <text class="t-s" x="264" y="123" text-anchor="middle">TextGenerationTaskParams</text>
+
+        <path class="ln-ctl" d="M392 113 V165" marker-end="url(#a-ctl)"/>
+        <text class="t-s" x="392" y="146" text-anchor="middle">commands topic</text>
+
+        <rect class="s-ctl" x="418" y="152" width="156" height="36" rx="3"/>
+        <text class="t-s" x="496" y="168" text-anchor="middle">least-loaded instance</text>
+        <text class="t-s" x="496" y="181" text-anchor="middle">→ TaskCreated</text>
+
+        <path class="ln-ctl" d="M614 171 V223" marker-end="url(#a-ctl)"/>
+        <text class="t-s" x="614" y="204" text-anchor="middle">global_events → every node</text>
+
+        <rect class="s-ctl" x="638" y="210" width="164" height="36" rx="3"/>
+        <text class="t-s" x="720" y="226" text-anchor="middle">plan() dispatches — only</text>
+        <text class="t-s" x="720" y="239" text-anchor="middle">once ALL runners are ready</text>
+
+        <path class="ln-ten" d="M826 229 V281" marker-end="url(#a-ten)"/>
+        <rect class="s-ten" x="640" y="290" width="216" height="48" rx="3"/>
+        <text class="t-s" x="748" y="306" text-anchor="middle">agree_on_tasks (all_gather)</text>
+        <text class="t-s" x="748" y="319" text-anchor="middle">prefill → decode step</text>
+        <text class="t-s" x="748" y="332" text-anchor="middle">rank 0 emits, other ranks discard</text>
+
+        <!-- return, right of the divider -->
+        <path class="ln-ten" d="M900 287 V235" marker-end="url(#a-ten)"/>
+        <text class="t-s t-ten" x="906" y="272">ChunkGenerated</text>
+        <path class="ln-ctl" d="M962 229 V177" marker-end="url(#a-ctl)"/>
+        <text class="t-s" x="968" y="214">local_events</text>
+        <path class="ln-ctl" d="M1024 171 V119" marker-end="url(#a-ctl)"/>
+        <text class="t-s" x="1030" y="156">indexed, logged</text>
+        <text class="t-s" x="1030" y="168">→ global_events</text>
+        <path class="ln-ctl" d="M1086 113 V61" marker-end="url(#a-ctl)"/>
+        <text class="t-s" x="1092" y="98" text-anchor="end">SSE frame</text>
+
+        <rect class="s-warn" x="640" y="356" width="468" height="40" rx="3"/>
+        <text class="t t-warn" x="656" y="374">these four hops repeat for EVERY token ↗</text>
+        <text class="t-s" x="656" y="388">a token is JSON, published, master-indexed and written to disk before it reaches the socket</text>
+
+        <text class="t-s" x="20" y="374">A model that exists but is not yet loaded is not an error:</text>
+        <text class="t-s" x="20" y="388">the request hangs open behind 10 s SSE keep-alive comments, with no server-side deadline.</text>
+      
+</svg>
