@@ -324,8 +324,10 @@ def get_eos_token_ids_for_model(model_id: ModelId) -> list[int] | None:
         or "qwen-3.5" in model_id_lower
         or "qwen3.6" in model_id_lower
         or "qwen-3.6" in model_id_lower
+        or "qwen3.8" in model_id_lower
+        or "qwen-3.8" in model_id_lower
     ):
-        # For Qwen3.5 / Qwen3.6: 248046 (<|im_end|>), 248044 (<|endoftext|>)
+        # For Qwen3.5 / Qwen3.6 / Qwen3.8: 248046 (<|im_end|>), 248044 (<|endoftext|>)
         return [248046, 248044]
     elif "gemma-4" in model_id_lower or "gemma-3" in model_id_lower:
         return [1, 106, 50]
