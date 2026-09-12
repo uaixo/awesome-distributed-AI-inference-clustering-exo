@@ -4,6 +4,7 @@
   import katex from "katex";
   import "katex/dist/katex.min.css";
   import { browser } from "$app/environment";
+  import { escapeHtml, sanitizeMarkdownHtml } from "$lib/utils/sanitizeHtml";
 
   interface Props {
     content: string;
@@ -51,18 +52,6 @@
   };
 
   marked.use({ renderer });
-
-  /**
-   * Unescape HTML entities that marked may have escaped
-   */
-  function unescapeHtmlEntities(text: string): string {
-    return text
-      .replace(/&lt;/g, "<")
-      .replace(/&gt;/g, ">")
-      .replace(/&amp;/g, "&")
-      .replace(/&quot;/g, '"')
-      .replace(/&#39;/g, "'");
-  }
 
   // Storage for math expressions extracted before markdown processing
   const mathExpressions: Map<
@@ -209,7 +198,7 @@
     processed = processed.replace(
       /\\begin\{proof\}([\s\S]*?)\\end\{proof\}/g,
       (_, content) => {
-        const html = `<div class="latex-proof"><div class="latex-proof-header">Proof</div><div class="latex-proof-content">${content}</div></div>`;
+        const html = `<div class="latex-proof"><div class="latex-proof-header">Proof</div><div class="latex-proof-content">${escapeHtml(content)}</div></div>`;
         const placeholder = `${HTML_PLACEHOLDER_PREFIX}${htmlCounter}END`;
         htmlSnippets.set(placeholder, html);
         htmlCounter++;
@@ -234,7 +223,7 @@
       );
       const envName = env.charAt(0).toUpperCase() + env.slice(1);
       processed = processed.replace(envRegex, (_, content) => {
-        const html = `<div class="latex-theorem"><div class="latex-theorem-header">${envName}</div><div class="latex-theorem-content">${content}</div></div>`;
+        const html = `<div class="latex-theorem"><div class="latex-theorem-header">${envName}</div><div class="latex-theorem-content">${escapeHtml(content)}</div></div>`;
         const placeholder = `${HTML_PLACEHOLDER_PREFIX}${htmlCounter}END`;
         htmlSnippets.set(placeholder, html);
         htmlCounter++;
@@ -245,19 +234,19 @@
     // Convert LaTeX text formatting commands (use placeholders to protect from markdown)
     processed = processed.replace(/\\emph\{([^}]*)\}/g, (_, content) => {
       const placeholder = `${HTML_PLACEHOLDER_PREFIX}${htmlCounter}END`;
-      htmlSnippets.set(placeholder, `<em>${content}</em>`);
+      htmlSnippets.set(placeholder, `<em>${escapeHtml(content)}</em>`);
       htmlCounter++;
       return placeholder;
     });
     processed = processed.replace(/\\textit\{([^}]*)\}/g, (_, content) => {
       const placeholder = `${HTML_PLACEHOLDER_PREFIX}${htmlCounter}END`;
-      htmlSnippets.set(placeholder, `<em>${content}</em>`);
+      htmlSnippets.set(placeholder, `<em>${escapeHtml(content)}</em>`);
       htmlCounter++;
       return placeholder;
     });
     processed = processed.replace(/\\textbf\{([^}]*)\}/g, (_, content) => {
       const placeholder = `${HTML_PLACEHOLDER_PREFIX}${htmlCounter}END`;
-      htmlSnippets.set(placeholder, `<strong>${content}</strong>`);
+      htmlSnippets.set(placeholder, `<strong>${escapeHtml(content)}</strong>`);
       htmlCounter++;
       return placeholder;
     });
@@ -265,7 +254,7 @@
       const placeholder = `${HTML_PLACEHOLDER_PREFIX}${htmlCounter}END`;
       htmlSnippets.set(
         placeholder,
-        `<code class="inline-code">${content}</code>`,
+        `<code class="inline-code">${escapeHtml(content)}</code>`,
       );
       htmlCounter++;
       return placeholder;
@@ -391,7 +380,7 @@
           }
         } catch {
           const display = displayMode ? `$$${content}$$` : `$${content}$`;
-          return `<span class="math-error"><span class="math-error-icon">⚠</span> ${display}</span>`;
+          return `<span class="math-error"><span class="math-error-icon">⚠</span> ${escapeHtml(display)}</span>`;
         }
       });
     }
@@ -417,10 +406,10 @@
       let html = marked.parse(preprocessed) as string;
       // Render math expressions
       html = renderMath(html);
-      return html;
+      return sanitizeMarkdownHtml(html);
     } catch (error) {
       console.error("Markdown processing error:", error);
-      return text.replace(/\n/g, "<br>");
+      return sanitizeMarkdownHtml(text.replace(/\n/g, "<br>"));
     }
   }
 
