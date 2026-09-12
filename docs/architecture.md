@@ -236,6 +236,17 @@ largest-remainder rounding, with a floor of one layer per node. Transport bootst
 here, centrally, and baked into the instance — the hostfile a runner later hands to MLX was
 computed by the master before any node bound a socket.
 
+That candidate set is factorial in the node count: a fully meshed nine-node cluster has
+125,673 simple cycles and an eleven-node one eleven million, which takes about a minute to
+enumerate. So the search is enumerated once per request and shared across every candidate
+placement in it, and placement walks only the shortest group of equal-length cycles that can
+hold the model rather than filtering all of them. Past `EXO_PLACEMENT_FULL_SEARCH_MAX_NODES`
+nodes the enumeration is limited to rings of `EXO_PLACEMENT_MAX_CYCLE_NODES` nodes, and
+`/instance/previews` reports that limit as `max_cycle_nodes` so a ring size that is missing
+because it was not searched is distinguishable from one that does not fit. Both placement
+endpoints run this in a thread, because the node has one event loop and the router, election,
+worker planner and every open stream share it.
+
 Two things the objective function does *not* contain are worth knowing: link bandwidth is never
 measured (a "fast link" is inferred from the interface name — Thunderbolt beats Ethernet beats
 Wi-Fi, with an explicit TODO admitting this), and existing instances' memory consumption is not

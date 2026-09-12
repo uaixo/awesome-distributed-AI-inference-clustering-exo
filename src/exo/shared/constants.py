@@ -122,6 +122,26 @@ ENABLE_DISAGGREGATION = os.getenv("ENABLE_DISAGGREGATION", "false").lower() == "
 
 EXO_MAX_CONCURRENT_REQUESTS = int(os.getenv("EXO_MAX_CONCURRENT_REQUESTS", "8"))
 
+# Placement enumerates every simple cycle in the topology to find the rings a model can
+# be sharded across, which is factorial in the node count on a fully meshed LAN. Measured
+# cost of one GET /instance/previews on a mesh, which asks placement 4N questions: five
+# nodes 0.013s, seven 0.19s, eight 1.3s, nine 12.9s. At or below this many nodes every
+# cycle is still enumerated, so placement chooses exactly what it has always chosen.
+EXO_PLACEMENT_FULL_SEARCH_MAX_NODES = int(
+    os.getenv("EXO_PLACEMENT_FULL_SEARCH_MAX_NODES", "8")
+)
+# The largest ring offered once the topology is past that threshold. Rings of more than
+# this many nodes are then not enumerated, so placement cannot choose one, and the
+# placement endpoints report the limit rather than reporting that no ring fits. Four keeps
+# previews under two seconds out to twenty nodes; five is about four times the work at
+# eleven nodes and twenty times at fourteen. Must be at least 2.
+EXO_PLACEMENT_MAX_CYCLE_NODES = int(os.getenv("EXO_PLACEMENT_MAX_CYCLE_NODES", "4"))
+if EXO_PLACEMENT_MAX_CYCLE_NODES < 2:
+    raise ValueError(
+        "EXO_PLACEMENT_MAX_CYCLE_NODES must be at least 2, got "
+        f"{EXO_PLACEMENT_MAX_CYCLE_NODES}"
+    )
+
 # Browser origins allowed to call the API cross-origin, comma-separated. Empty by
 # default: the dashboard is served from the same origin as the API, so nothing
 # the node ships needs a CORS header. "*" is refused because it would let any

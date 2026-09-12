@@ -289,6 +289,10 @@ class PlacementPreview(BaseModel):
 
 class PlacementPreviewResponse(BaseModel):
     previews: list[PlacementPreview]
+    # The largest ring the search considered, or null when every ring in the topology
+    # was enumerated. Set only on a topology too large to enumerate fully, where a
+    # missing preview means "not searched" rather than "does not fit".
+    max_cycle_nodes: int | None = None
 
 
 class DeleteInstanceTaskParams(BaseModel):

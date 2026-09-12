@@ -6,13 +6,14 @@ import random
 import time
 from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable
 from datetime import datetime, timezone
+from functools import partial
 from http import HTTPStatus
 from pathlib import Path
 from typing import Annotated, Any, Literal, cast
 from uuid import uuid4
 
 import anyio
-from anyio import BrokenResourceError, ClosedResourceError
+from anyio import BrokenResourceError, ClosedResourceError, to_thread
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -52,6 +53,7 @@ from exo.api.auth import (
     resolve_api_key,
 )
 from exo.api.keepalive import with_sse_keepalive
+from exo.api.placement_previews import build_placement_previews
 from exo.api.types import (
     AddCustomModelParams,
     AdvancedImageParams,
@@ -92,7 +94,6 @@ from exo.api.types import (
     ModelList,
     ModelListModel,
     PlaceInstanceParams,
-    PlacementPreview,
     PlacementPreviewResponse,
     StartDownloadParams,
     StartDownloadResponse,
@@ -130,6 +131,7 @@ from exo.api.types.openai_responses import (
 )
 from exo.master.image_store import ImageStore
 from exo.master.placement import place_instance as get_instance_placements
+from exo.master.placement import search_placement_cycles
 from exo.shared.apply import apply
 from exo.shared.constants import (
     ENABLE_DISAGGREGATION,
@@ -550,26 +552,37 @@ class API:
     ) -> Instance:
         model_card = await ModelCard.load(model_id)
 
-        try:
-            placements = get_instance_placements(
+        # One snapshot for the whole answer. apply() rebinds self.state to a new State and
+        # deep-copies the topology before mutating it, so this keeps reading one
+        # consistent cluster while the placement runs in a thread.
+        state = self.state
+
+        def _place() -> dict[InstanceId, Instance]:
+            return get_instance_placements(
                 PlaceInstance(
                     model_card=model_card,
                     sharding=sharding,
                     instance_meta=instance_meta,
                     min_nodes=min_nodes,
                 ),
-                node_memory=self.state.node_memory,
-                node_network=self.state.node_network,
-                node_backends=self.state.node_backends,
-                topology=self.state.topology,
-                current_instances=self.state.instances,
-                download_status=self.state.downloads,
-                node_rdma_ctl=self.state.node_rdma_ctl,
+                node_memory=state.node_memory,
+                node_network=state.node_network,
+                node_backends=state.node_backends,
+                topology=state.topology,
+                current_instances=state.instances,
+                download_status=state.downloads,
+                node_rdma_ctl=state.node_rdma_ctl,
+                cycles_by_length=search_placement_cycles(state.topology).by_length,
             )
+
+        try:
+            # Enumerating the topology's cycles is O(factorial) in the node count, so it
+            # goes in a thread rather than stalling every other task on this loop.
+            placements = await to_thread.run_sync(_place)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-        current_ids = set(self.state.instances.keys())
+        current_ids = set(state.instances.keys())
         new_ids = [
             instance_id for instance_id in placements if instance_id not in current_ids
         ]
@@ -586,11 +599,12 @@ class API:
         model_id: ModelId,
         node_ids: Annotated[list[NodeId] | None, Query()] = None,
     ) -> PlacementPreviewResponse:
-        seen: set[tuple[ModelId, Sharding, InstanceMeta, int]] = set()
-        previews: list[PlacementPreview] = []
-        required_nodes = set(node_ids) if node_ids else None
-
-        if len(list(self.state.topology.list_nodes())) == 0:
+        # One snapshot for the whole response, read before anything is awaited. apply()
+        # rebinds self.state to a new State and deep-copies the topology before mutating
+        # it, so every preview below is computed against the same cluster even though the
+        # batch runs in a thread.
+        state = self.state
+        if len(list(state.topology.list_nodes())) == 0:
             return PlacementPreviewResponse(previews=[])
 
         try:
@@ -599,112 +613,15 @@ class API:
             raise HTTPException(
                 status_code=400, detail=f"Failed to load model card: {exc}"
             ) from exc
-        instance_combinations: list[tuple[Sharding, InstanceMeta, int]] = []
-        for sharding in (Sharding.Pipeline, Sharding.Tensor):
-            for instance_meta in (InstanceMeta.MlxRing, InstanceMeta.MlxJaccl):
-                instance_combinations.extend(
-                    [
-                        (sharding, instance_meta, i)
-                        for i in range(
-                            1, len(list(self.state.topology.list_nodes())) + 1
-                        )
-                    ]
-                )
-        # TODO: PDD
-        # instance_combinations.append((Sharding.PrefillDecodeDisaggregation, InstanceMeta.MlxRing, 1))
 
-        for sharding, instance_meta, min_nodes in instance_combinations:
-            try:
-                placements = get_instance_placements(
-                    PlaceInstance(
-                        model_card=model_card,
-                        sharding=sharding,
-                        instance_meta=instance_meta,
-                        min_nodes=min_nodes,
-                    ),
-                    node_memory=self.state.node_memory,
-                    node_network=self.state.node_network,
-                    node_backends=self.state.node_backends,
-                    topology=self.state.topology,
-                    current_instances=self.state.instances,
-                    required_nodes=required_nodes,
-                    download_status=self.state.downloads,
-                    node_rdma_ctl=self.state.node_rdma_ctl,
-                )
-            except ValueError as exc:
-                if (model_card.model_id, sharding, instance_meta, 0) not in seen:
-                    previews.append(
-                        PlacementPreview(
-                            model_id=model_card.model_id,
-                            sharding=sharding,
-                            instance_meta=instance_meta,
-                            instance=None,
-                            error=str(exc),
-                        )
-                    )
-                seen.add((model_card.model_id, sharding, instance_meta, 0))
-                continue
+        required_nodes = set(node_ids) if node_ids else None
 
-            current_ids = set(self.state.instances.keys())
-            new_instances = [
-                instance
-                for instance_id, instance in placements.items()
-                if instance_id not in current_ids
-            ]
-
-            if len(new_instances) != 1:
-                if (model_card.model_id, sharding, instance_meta, 0) not in seen:
-                    previews.append(
-                        PlacementPreview(
-                            model_id=model_card.model_id,
-                            sharding=sharding,
-                            instance_meta=instance_meta,
-                            instance=None,
-                            error="Expected exactly one new instance from placement",
-                        )
-                    )
-                seen.add((model_card.model_id, sharding, instance_meta, 0))
-                continue
-
-            instance = new_instances[0]
-            shard_assignments = instance.shard_assignments
-            placement_node_ids = list(shard_assignments.node_to_runner.keys())
-
-            memory_delta_by_node: dict[str, int] = {}
-            if placement_node_ids:
-                total_bytes = model_card.storage_size.in_bytes
-                per_node = total_bytes // len(placement_node_ids)
-                remainder = total_bytes % len(placement_node_ids)
-                for index, node_id in enumerate(sorted(placement_node_ids, key=str)):
-                    extra = 1 if index < remainder else 0
-                    memory_delta_by_node[str(node_id)] = per_node + extra
-
-            if (
-                model_card.model_id,
-                sharding,
-                instance_meta,
-                len(placement_node_ids),
-            ) not in seen:
-                previews.append(
-                    PlacementPreview(
-                        model_id=model_card.model_id,
-                        sharding=sharding,
-                        instance_meta=instance_meta,
-                        instance=instance,
-                        memory_delta_by_node=memory_delta_by_node or None,
-                        error=None,
-                    )
-                )
-            seen.add(
-                (
-                    model_card.model_id,
-                    sharding,
-                    instance_meta,
-                    len(placement_node_ids),
-                )
-            )
-
-        return PlacementPreviewResponse(previews=previews)
+        # 4N placements over a cycle set that is factorial in the node count: on a ten
+        # node mesh this is seconds of work, and it would otherwise stall the router,
+        # election, the worker planner and every open SSE stream for all of it.
+        return await to_thread.run_sync(
+            partial(build_placement_previews, model_card, state, required_nodes)
+        )
 
     def get_instance(self, instance_id: InstanceId) -> Instance:
         if instance_id not in self.state.instances:

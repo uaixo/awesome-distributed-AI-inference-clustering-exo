@@ -209,6 +209,45 @@ class Topology:
             cycles.append(Cycle(node_ids=[node_id]))
         return cycles
 
+    def get_cycles_up_to(self, max_nodes: int) -> list[Cycle]:
+        """Get the simple cycles of at most ``max_nodes`` nodes, plus singleton cycles.
+
+        Same result as ``get_cycles`` filtered to ``len(cycle) <= max_nodes``, but it
+        never enumerates a longer cycle, so the cost is polynomial in the node count at
+        a fixed ``max_nodes`` instead of factorial. The cycles come back in a different
+        order and each one starts at a different node than ``get_cycles`` would choose,
+        which changes the shard ranks and the ring wiring placement derives from a
+        cycle: see ``search_placement_cycles`` in exo.master.placement for where that is
+        acceptable.
+
+        Raises ValueError for ``max_nodes`` below 2, since rustworkx treats a cutoff of
+        0 as unbounded and a cutoff of 1 as 2, so a smaller bound would silently
+        enumerate more than it was asked for.
+        """
+        if max_nodes < 2:
+            raise ValueError(f"max_nodes must be at least 2, got {max_nodes}")
+
+        cycles: list[Cycle] = []
+        for vertex in self._graph.node_indices():
+            if self._graph.has_edge(vertex, vertex):
+                cycles.append(Cycle(node_ids=[self._graph[vertex]]))
+
+            predecessors = list(self._graph.predecessor_indices(vertex))
+            if not predecessors:
+                continue
+
+            for path in rx.digraph_all_simple_paths(
+                self._graph, vertex, predecessors, min_depth=2, cutoff=max_nodes
+            ):
+                # Each cycle is walked once per node it contains. Keeping only the walk
+                # that starts at its lowest vertex index emits each cycle exactly once.
+                if min(path) == vertex:
+                    cycles.append(Cycle(node_ids=[self._graph[idx] for idx in path]))
+
+        for node_id in self.list_nodes():
+            cycles.append(Cycle(node_ids=[node_id]))
+        return cycles
+
     def get_rdma_cycles(self) -> list[Cycle]:
         rdma_edges = [
             (u, v, conn)
