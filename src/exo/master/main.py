@@ -9,6 +9,7 @@ from exo.master.placement import (
     delete_instance,
     get_transition_events,
     place_instance,
+    search_placement_cycles,
 )
 from exo.master.placement_utils import find_ip_prioritised
 from exo.routing.event_router import (
@@ -378,6 +379,9 @@ class Master:
                                 self.state.node_backends,
                                 download_status=self.state.downloads,
                                 node_rdma_ctl=self.state.node_rdma_ctl,
+                                cycle_search=search_placement_cycles(
+                                    self.state.topology
+                                ),
                             )
                             transition_events = get_transition_events(
                                 self.state.instances, placement, self.state.tasks

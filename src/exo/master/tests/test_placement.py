@@ -5,6 +5,7 @@ import pytest
 from exo.master.placement import (
     get_transition_events,
     place_instance,
+    search_placement_cycles,
 )
 from exo.master.tests.conftest import (
     create_node_memory,
@@ -166,7 +167,13 @@ def test_get_instance_placements_create_instance(
 
     # act
     placements = place_instance(
-        cic, topology, {}, node_memory, node_network, _metal_only(node_memory)
+        cic,
+        topology,
+        {},
+        node_memory,
+        node_network,
+        _metal_only(node_memory),
+        cycle_search=search_placement_cycles(topology),
     )
 
     # assert
@@ -211,7 +218,13 @@ def test_get_instance_placements_one_node_exact_fit() -> None:
         ),
     )
     placements = place_instance(
-        cic, topology, {}, node_memory, node_network, _metal_only(node_memory)
+        cic,
+        topology,
+        {},
+        node_memory,
+        node_network,
+        _metal_only(node_memory),
+        cycle_search=search_placement_cycles(topology),
     )
 
     assert len(placements) == 1
@@ -241,7 +254,13 @@ def test_get_instance_placements_one_node_fits_with_extra_memory() -> None:
         ),
     )
     placements = place_instance(
-        cic, topology, {}, node_memory, node_network, _metal_only(node_memory)
+        cic,
+        topology,
+        {},
+        node_memory,
+        node_network,
+        _metal_only(node_memory),
+        cycle_search=search_placement_cycles(topology),
     )
 
     assert len(placements) == 1
@@ -273,7 +292,13 @@ def test_get_instance_placements_one_node_not_fit() -> None:
 
     with pytest.raises(ValueError, match="No cycles found with sufficient memory"):
         place_instance(
-            cic, topology, {}, node_memory, node_network, _metal_only(node_memory)
+            cic,
+            topology,
+            {},
+            node_memory,
+            node_network,
+            _metal_only(node_memory),
+            cycle_search=search_placement_cycles(topology),
         )
 
 
@@ -374,7 +399,13 @@ def test_placement_selects_leaf_nodes(
 
     # act
     placements = place_instance(
-        cic, topology, {}, node_memory, node_network, _metal_only(node_memory)
+        cic,
+        topology,
+        {},
+        node_memory,
+        node_network,
+        _metal_only(node_memory),
+        cycle_search=search_placement_cycles(topology),
     )
 
     # assert
@@ -481,6 +512,7 @@ def test_tensor_rdma_backend_connectivity_matrix(
         node_network,
         _metal_only(node_memory),
         node_rdma_ctl=node_rdma_ctl,
+        cycle_search=search_placement_cycles(topology),
     )
 
     # assert
@@ -609,6 +641,7 @@ def test_place_mlx_jaccl_rejects_when_a_node_has_rdma_ctl_disabled(
             node_network,
             _metal_only(node_memory),
             node_rdma_ctl=node_rdma_ctl,
+            cycle_search=search_placement_cycles(topology),
         )
 
 
@@ -647,6 +680,7 @@ def test_place_mlx_jaccl_rejects_when_node_rdma_ctl_missing(model_card: ModelCar
             node_network,
             _metal_only(node_memory),
             node_rdma_ctl=node_rdma_ctl,
+            cycle_search=search_placement_cycles(topology),
         )
 
 
@@ -821,6 +855,7 @@ def test_placement_prefers_cycle_with_downloaded_model(
         node_network,
         _metal_only(node_memory),
         download_status=download_status,
+        cycle_search=search_placement_cycles(topology),
     )
 
     assert len(placements) == 1
@@ -899,6 +934,7 @@ def test_placement_prefers_cycle_with_higher_download_progress(
         node_network,
         _metal_only(node_memory),
         download_status=download_status,
+        cycle_search=search_placement_cycles(topology),
     )
 
     assert len(placements) == 1
@@ -953,6 +989,7 @@ def test_placement_does_not_prefer_cycle_with_failed_download(
         node_network,
         _metal_only(node_memory),
         download_status=download_status,
+        cycle_search=search_placement_cycles(topology),
     )
 
     assert len(placements) == 1
@@ -977,7 +1014,13 @@ def test_placement_rejects_when_model_backends_disjoint_from_engine(
 
     with pytest.raises(ValueError, match="cannot satisfy engine MlxRing"):
         place_instance(
-            cic, topology, {}, node_memory, node_network, _metal_only(node_memory)
+            cic,
+            topology,
+            {},
+            node_memory,
+            node_network,
+            _metal_only(node_memory),
+            cycle_search=search_placement_cycles(topology),
         )
 
 
@@ -1021,7 +1064,15 @@ def test_placement_rejects_when_only_some_nodes_support_backend(
     )
 
     with pytest.raises(ValueError, match="No cycle where every node supports"):
-        place_instance(cic, topology, {}, node_memory, node_network, node_backends)
+        place_instance(
+            cic,
+            topology,
+            {},
+            node_memory,
+            node_network,
+            node_backends,
+            cycle_search=search_placement_cycles(topology),
+        )
 
 
 def test_mlx_jaccl_rejects_cuda_only_cycle(model_card: ModelCard):
@@ -1055,4 +1106,5 @@ def test_mlx_jaccl_rejects_cuda_only_cycle(model_card: ModelCard):
             node_network,
             node_backends,
             node_rdma_ctl=node_rdma_ctl,
+            cycle_search=search_placement_cycles(topology),
         )

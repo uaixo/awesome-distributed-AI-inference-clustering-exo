@@ -236,6 +236,23 @@ largest-remainder rounding, with a floor of one layer per node. Transport bootst
 here, centrally, and baked into the instance — the hostfile a runner later hands to MLX was
 computed by the master before any node bound a socket.
 
+That candidate set is factorial in the node count: a fully meshed nine-node cluster has
+125,673 simple cycles and an eleven-node one eleven million, which takes about a minute to
+enumerate. So the search is enumerated once per request and shared across every candidate
+placement in it, and placement walks only the shortest group of equal-length cycles that can
+hold the model rather than filtering all of them. A topology holding more than
+`EXO_PLACEMENT_MAX_CYCLES` cycles is not enumerated in full: the enumeration is limited to
+rings of `EXO_PLACEMENT_MAX_CYCLE_NODES` nodes instead, and `/instance/previews` reports that
+limit as `max_cycle_nodes` so a ring size that is missing because it was not searched is
+distinguishable from one that does not fit. Placement reports the same distinction as a
+`PlacementSearchTruncatedError`. The budget counts cycles rather than nodes because node count
+does not predict the cost — forty Macs in a Thunderbolt loop hold forty cycles and are still
+searched exactly, while eleven in a mesh hold eleven million — and because a lazy enumeration
+establishes that a topology is over budget in about 25ms whatever its size. Both placement
+endpoints run this in a thread, and share one capacity limiter so a burst of requests cannot
+turn the whole thread pool into concurrent enumerations on a node that is also running
+inference.
+
 Two things the objective function does *not* contain are worth knowing: link bandwidth is never
 measured (a "fast link" is inferred from the interface name — Thunderbolt beats Ethernet beats
 Wi-Fi, with an explicit TODO admitting this), and existing instances' memory consumption is not

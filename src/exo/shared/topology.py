@@ -209,6 +209,76 @@ class Topology:
             cycles.append(Cycle(node_ids=[node_id]))
         return cycles
 
+    def get_cycles_within_budget(self, max_cycles: int) -> list[Cycle] | None:
+        """Get what ``get_cycles`` returns, or None if the graph holds more than ``max_cycles``.
+
+        The budget counts the simple cycles the graph holds, which is the factorial part.
+        The singleton cycle each node gets is always kept: there is one per node, and they
+        are the only candidates for placing on a single node.
+
+        ``rx.simple_cycles`` is a lazy iterator, so this abandons the walk as soon as the
+        budget is passed instead of paying for the whole enumeration: on a fully meshed
+        graph it answers None in about 25ms at any node count. A graph within budget
+        returns the same cycles in the same order as ``get_cycles``, so a caller that
+        takes this path places exactly what it always placed.
+
+        The cycles collected before the budget was passed are discarded rather than
+        returned, since a caller that filters by cycle length would otherwise see a
+        length group holding only some of its cycles and silently choose from a subset.
+
+        Raises ValueError for a budget below 1, which no graph can satisfy.
+        """
+        if max_cycles < 1:
+            raise ValueError(f"max_cycles must be at least 1, got {max_cycles}")
+
+        cycles: list[Cycle] = []
+        for cycle_idx in rx.simple_cycles(self._graph):
+            if len(cycles) == max_cycles:
+                return None
+            cycles.append(Cycle(node_ids=[self._graph[idx] for idx in cycle_idx]))
+        for node_id in self.list_nodes():
+            cycles.append(Cycle(node_ids=[node_id]))
+        return cycles
+
+    def get_cycles_up_to(self, max_nodes: int) -> list[Cycle]:
+        """Get the simple cycles of at most ``max_nodes`` nodes, plus singleton cycles.
+
+        Same result as ``get_cycles`` filtered to ``len(cycle) <= max_nodes``, but it
+        never enumerates a longer cycle, so the cost is polynomial in the node count at
+        a fixed ``max_nodes`` instead of factorial. The cycles come back in a different
+        order and each one starts at a different node than ``get_cycles`` would choose,
+        which changes the shard ranks and the ring wiring placement derives from a
+        cycle: see ``search_placement_cycles`` in exo.master.placement for where that is
+        acceptable.
+
+        Raises ValueError for ``max_nodes`` below 2, since rustworkx treats a cutoff of
+        0 as unbounded and a cutoff of 1 as 2, so a smaller bound would silently
+        enumerate more than it was asked for.
+        """
+        if max_nodes < 2:
+            raise ValueError(f"max_nodes must be at least 2, got {max_nodes}")
+
+        cycles: list[Cycle] = []
+        for vertex in self._graph.node_indices():
+            if self._graph.has_edge(vertex, vertex):
+                cycles.append(Cycle(node_ids=[self._graph[vertex]]))
+
+            predecessors = list(self._graph.predecessor_indices(vertex))
+            if not predecessors:
+                continue
+
+            for path in rx.digraph_all_simple_paths(
+                self._graph, vertex, predecessors, min_depth=2, cutoff=max_nodes
+            ):
+                # Each cycle is walked once per node it contains. Keeping only the walk
+                # that starts at its lowest vertex index emits each cycle exactly once.
+                if min(path) == vertex:
+                    cycles.append(Cycle(node_ids=[self._graph[idx] for idx in path]))
+
+        for node_id in self.list_nodes():
+            cycles.append(Cycle(node_ids=[node_id]))
+        return cycles
+
     def get_rdma_cycles(self) -> list[Cycle]:
         rdma_edges = [
             (u, v, conn)

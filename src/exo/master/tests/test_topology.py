@@ -1,9 +1,10 @@
 import pytest
 
+from exo.master.tests.conftest import create_mesh_topology
 from exo.shared.topology import Topology
 from exo.shared.types.common import NodeId
 from exo.shared.types.multiaddr import Multiaddr
-from exo.shared.types.topology import Connection, SocketConnection
+from exo.shared.types.topology import Connection, Cycle, SocketConnection
 
 
 @pytest.fixture
@@ -106,3 +107,58 @@ def test_list_nodes(topology: Topology, socket_connection: SocketConnection):
     assert len(nodes) == 2
     assert all(isinstance(node, NodeId) for node in nodes)
     assert set(node for node in nodes) == set([node_a, node_b])
+
+
+@pytest.mark.parametrize("node_count", [3, 4, 5, 6])
+@pytest.mark.parametrize("max_nodes", [2, 3, 4, 5, 6])
+def test_bounded_cycles_are_the_full_cycles_of_that_length(
+    node_count: int, max_nodes: int
+):
+    topology, _ = create_mesh_topology(node_count)
+
+    bounded = _canonical(topology.get_cycles_up_to(max_nodes))
+    expected = _canonical(
+        [cycle for cycle in topology.get_cycles() if len(cycle) <= max_nodes]
+    )
+
+    assert bounded == expected
+
+
+def test_bounded_cycles_keep_one_singleton_per_node():
+    topology, node_ids = create_mesh_topology(4)
+
+    singletons = [cycle for cycle in topology.get_cycles_up_to(2) if len(cycle) == 1]
+
+    assert sorted(str(cycle.node_ids[0]) for cycle in singletons) == sorted(
+        str(node_id) for node_id in node_ids
+    )
+
+
+def test_bounded_cycles_never_enumerate_a_longer_ring():
+    topology, _ = create_mesh_topology(6)
+
+    assert max(len(cycle) for cycle in topology.get_cycles_up_to(3)) == 3
+
+
+@pytest.mark.parametrize("max_nodes", [-1, 0, 1])
+def test_a_bound_below_two_is_refused(max_nodes: int):
+    # rustworkx reads a cutoff of 0 as unbounded and 1 as 2, so a smaller bound would
+    # quietly enumerate more than the caller asked for.
+    topology, _ = create_mesh_topology(3)
+
+    with pytest.raises(ValueError, match="at least 2"):
+        topology.get_cycles_up_to(max_nodes)
+
+
+def _canonical(cycles: list[Cycle]) -> list[tuple[str, ...]]:
+    """Cycles as rotation-independent keys, keeping direction, so two runs compare."""
+    rotations: list[tuple[str, ...]] = []
+    for cycle in cycles:
+        node_ids = [str(node_id) for node_id in cycle.node_ids]
+        rotations.append(
+            min(
+                tuple(node_ids[index:] + node_ids[:index])
+                for index in range(len(node_ids))
+            )
+        )
+    return sorted(rotations)

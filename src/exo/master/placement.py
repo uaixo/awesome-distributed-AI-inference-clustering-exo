@@ -1,6 +1,7 @@
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from copy import deepcopy
-from typing import Sequence
+from dataclasses import dataclass
+from typing import Sequence, final
 
 from exo.master.placement_utils import (
     Cycle,
@@ -9,7 +10,10 @@ from exo.master.placement_utils import (
     get_mlx_jaccl_devices_matrix,
     get_mlx_ring_hosts_by_node,
     get_shard_assignments,
-    get_smallest_cycles,
+)
+from exo.shared.constants import (
+    EXO_PLACEMENT_MAX_CYCLE_NODES,
+    EXO_PLACEMENT_MAX_CYCLES,
 )
 from exo.shared.models.model_cards import ModelId
 from exo.shared.topology import Topology
@@ -103,6 +107,214 @@ def _cycle_download_score(
     )
 
 
+CyclesByLength = Mapping[int, Sequence[Cycle]]
+"""Cycles grouped by node count, each group in the order the search produced them.
+
+Placement only ever uses one group — the smallest whose cycles can hold the model — so
+grouping lets it stop at that one instead of walking every cycle in the topology. The
+order within a group is the enumeration order, which is what breaks ties between equally
+good cycles, so grouping does not change which cycle is chosen.
+"""
+
+
+@final
+@dataclass(frozen=True)
+class CycleSearch:
+    """The rings placement may choose from, and the ring size the search stopped at."""
+
+    by_length: CyclesByLength
+    """The cycles to place on, grouped by node count."""
+
+    max_cycle_nodes: int | None
+    """The largest ring enumerated, or None when every ring in the topology was."""
+
+    @property
+    def cycles(self) -> list[Cycle]:
+        """Every cycle found, shortest group first."""
+        return [
+            cycle
+            for length in sorted(self.by_length)
+            for cycle in self.by_length[length]
+        ]
+
+
+@final
+class PlacementSearchTruncatedError(ValueError):
+    """No ring could be placed on, and rings above ``max_cycle_nodes`` were not searched.
+
+    Distinct from the plain ValueError placement raises so that a caller can tell "this
+    cluster cannot run the model" from "the rings that could have run it were too
+    expensive to enumerate". Only ``search_placement_cycles`` can produce a search this
+    applies to.
+    """
+
+    def __init__(self, message: str, max_cycle_nodes: int) -> None:
+        """Record the largest ring size that was searched alongside the message."""
+        super().__init__(message)
+        self.max_cycle_nodes = max_cycle_nodes
+
+
+def group_cycles_by_length(cycles: Iterable[Cycle]) -> CyclesByLength:
+    """Group cycles by node count, keeping the order they arrived in within each group."""
+    grouped: dict[int, list[Cycle]] = {}
+    for cycle in cycles:
+        grouped.setdefault(len(cycle), []).append(cycle)
+    return grouped
+
+
+def search_placement_cycles(
+    topology: Topology,
+    max_cycles: int = EXO_PLACEMENT_MAX_CYCLES,
+    max_cycle_nodes: int = EXO_PLACEMENT_MAX_CYCLE_NODES,
+) -> CycleSearch:
+    """Find the rings ``place_instance`` may choose from, within a cost it can afford.
+
+    Enumerating every simple cycle is factorial in the node count: a fully meshed nine
+    node cluster has 125,673 of them and an eleven node one eleven million, which takes
+    about a minute. A topology holding no more than ``max_cycles`` is still enumerated in
+    full, which is what placement has always done, so it chooses exactly what it always
+    chose. Only past that budget is the search limited to rings of ``max_cycle_nodes``
+    nodes: cheap, but placement can then no longer choose a longer ring, and the cycles
+    come back in a different order and anchored at a different node, which moves shard
+    ranks and ring wiring. ``CycleSearch.max_cycle_nodes`` reports the limit that was
+    applied, so a caller can say a ring size was not searched rather than that nothing
+    fits.
+
+    The budget counts cycles rather than nodes because node count does not predict the
+    cost: forty Macs in a Thunderbolt loop hold forty cycles and are enumerated exactly,
+    while eleven in a mesh hold eleven million. Establishing that a topology is over
+    budget costs about 25ms whatever its size, since the cycles are drained from a lazy
+    iterator and the walk is abandoned once the budget is passed.
+
+    Call this once per request and pass the result to every ``place_instance`` call that
+    request makes: the enumeration does not depend on the command, so repeating it per
+    candidate multiplies the cost by the number of candidates.
+    """
+    every_cycle = topology.get_cycles_within_budget(max_cycles)
+    if every_cycle is not None:
+        return CycleSearch(
+            by_length=group_cycles_by_length(every_cycle), max_cycle_nodes=None
+        )
+    return CycleSearch(
+        by_length=group_cycles_by_length(topology.get_cycles_up_to(max_cycle_nodes)),
+        max_cycle_nodes=max_cycle_nodes,
+    )
+
+
+def _cycles_the_sharding_allows(
+    command: PlaceInstance, cycles: Sequence[Cycle]
+) -> list[Cycle]:
+    """Keep the cycles whose node count the requested sharding can actually use."""
+    if command.sharding == Sharding.Tensor:
+        # TODO: the condition here for tensor parallel is not correct, but it works good enough for now.
+        # DeepSeek V4 is MQA (num_key_value_heads=1) but its sharding strategy
+        # head-parallelises wq_b/wo_a and shards MoE experts instead of splitting
+        # KV heads, so the kv-head divisibility check doesn't apply.
+        is_deepseek_v4 = command.model_card.base_model.startswith("DeepSeek V4")
+        kv_heads = command.model_card.num_key_value_heads
+        return [
+            cycle
+            for cycle in cycles
+            if command.model_card.hidden_size % len(cycle) == 0
+            and (is_deepseek_v4 or kv_heads is None or kv_heads % len(cycle) == 0)
+        ]
+    if (
+        command.sharding == Sharding.Pipeline
+        and command.model_card.base_model.startswith("Gemma 4")
+    ):
+        return [cycle for cycle in cycles if len(cycle) == 1]
+    return list(cycles)
+
+
+def _reject_sharding_the_model_cannot_do(command: PlaceInstance) -> None:
+    """Raise for a sharding this model never supports, whatever the topology offers."""
+    if command.sharding == Sharding.Tensor and not command.model_card.supports_tensor:
+        raise ValueError(
+            f"Requested Tensor sharding but this model does not support tensor parallelism: {command.model_card.model_id}"
+        )
+    if command.sharding == Sharding.Pipeline and command.model_card.model_id == ModelId(
+        "mlx-community/DeepSeek-V3.1-8bit"
+    ):
+        raise ValueError(
+            "Pipeline parallelism is not supported for DeepSeek V3.1 (8-bit)"
+        )
+
+
+def _no_placement_reason(command: PlaceInstance, checked_model: bool) -> str:
+    """Why no cycle could be placed on, in the order a reader would check the causes."""
+    if not checked_model:
+        return "No cycles found with sufficient memory"
+    if command.sharding == Sharding.Tensor:
+        kv_heads = command.model_card.num_key_value_heads
+        return (
+            f"No tensor sharding found for model with "
+            f"hidden_size={command.model_card.hidden_size}"
+            f"{f', num_key_value_heads={kv_heads}' if kv_heads is not None else ''}"
+            f" across candidate cycles"
+        )
+    return "Pipeline parallelism is not supported for Gemma 4; use tensor parallelism instead."
+
+
+def _smallest_placeable_cycles(
+    command: PlaceInstance,
+    cycle_search: CycleSearch,
+    node_count: int,
+    node_memory: Mapping[NodeId, MemoryUsage],
+    required_nodes: set[NodeId] | None,
+) -> list[Cycle]:
+    """The smallest group of equal-length cycles this command can be placed on.
+
+    Walks the groups shortest first and returns the first that survives the required
+    nodes, the memory the model needs, and what the sharding can use. Stopping there is
+    what filtering every cycle and then taking the shortest survivors amounts to, since
+    the three filters look only at a cycle's nodes, so a longer group can never displace
+    a shorter one that passed. The difference is cost: the groups past the answer are
+    never walked, and on a fully meshed cluster they hold almost every cycle.
+
+    Raises ValueError naming the first obstacle, in the order a reader would check them:
+    nothing with enough memory, then a sharding the model cannot do, then no cycle whose
+    node count that sharding can use. Raises ``PlacementSearchTruncatedError`` instead when the
+    search was bounded and the cluster has more nodes than the bound, since then a ring
+    that was never enumerated might have been placeable and no other message may claim
+    the cluster cannot hold the model.
+    """
+    cycles_by_length = cycle_search.by_length
+    lengths = sorted(
+        length for length in cycles_by_length if length >= command.min_nodes
+    )
+    checked_model = False
+    for length in lengths:
+        group: Sequence[Cycle] = cycles_by_length[length]
+        if required_nodes:
+            group = [
+                cycle for cycle in group if required_nodes.issubset(cycle.node_ids)
+            ]
+        with_memory = filter_cycles_by_memory(
+            list(group), node_memory, command.model_card.storage_size
+        )
+        if not with_memory:
+            continue
+        if not checked_model:
+            # Only reachable once something fits in memory, so that a cluster too small
+            # for the model still reports memory rather than the sharding.
+            _reject_sharding_the_model_cannot_do(command)
+            checked_model = True
+        allowed = _cycles_the_sharding_allows(command, with_memory)
+        if allowed:
+            return allowed
+
+    max_cycle_nodes = cycle_search.max_cycle_nodes
+    if max_cycle_nodes is not None and node_count > max_cycle_nodes:
+        raise PlacementSearchTruncatedError(
+            f"Rings of more than {max_cycle_nodes} nodes were not searched on this "
+            f"{node_count} node cluster, because enumerating them costs more than the "
+            f"placement budget allows. Within the rings that were searched: "
+            f"{_no_placement_reason(command, checked_model)}",
+            max_cycle_nodes=max_cycle_nodes,
+        )
+    raise ValueError(_no_placement_reason(command, checked_model))
+
+
 def place_instance(
     command: PlaceInstance,
     topology: Topology,
@@ -113,66 +325,26 @@ def place_instance(
     required_nodes: set[NodeId] | None = None,
     download_status: Mapping[NodeId, Sequence[DownloadProgress]] | None = None,
     node_rdma_ctl: Mapping[NodeId, NodeRdmaCtlStatus] | None = None,
+    *,
+    cycle_search: CycleSearch,
 ) -> dict[InstanceId, Instance]:
-    cycles = topology.get_cycles()
-    candidate_cycles = list(filter(lambda it: len(it) >= command.min_nodes, cycles))
+    """Build the instance this command places, or raise ValueError explaining why not.
 
-    # Filter to cycles containing all required nodes (subset matching)
-    if required_nodes:
-        candidate_cycles = [
-            cycle
-            for cycle in candidate_cycles
-            if required_nodes.issubset(cycle.node_ids)
-        ]
-    cycles_with_sufficient_memory = filter_cycles_by_memory(
-        candidate_cycles, node_memory, command.model_card.storage_size
+    ``cycle_search`` must be the rings of ``topology`` — ``search_placement_cycles``
+    produces exactly that. It is a parameter rather than something this function
+    enumerates because enumerating is the expensive part and does not depend on
+    ``command``, so a caller trying several commands against one topology enumerates once
+    and this walks only the group it places on. It carries the ring size the search
+    stopped at as well as the rings, so a failure can say a ring size was not searched
+    rather than that nothing fits.
+    """
+    smallest_cycles = _smallest_placeable_cycles(
+        command,
+        cycle_search,
+        len(list(topology.list_nodes())),
+        node_memory,
+        required_nodes,
     )
-    if len(cycles_with_sufficient_memory) == 0:
-        raise ValueError("No cycles found with sufficient memory")
-
-    if command.sharding == Sharding.Tensor:
-        if not command.model_card.supports_tensor:
-            raise ValueError(
-                f"Requested Tensor sharding but this model does not support tensor parallelism: {command.model_card.model_id}"
-            )
-        # TODO: the condition here for tensor parallel is not correct, but it works good enough for now.
-        # DeepSeek V4 is MQA (num_key_value_heads=1) but its sharding strategy
-        # head-parallelises wq_b/wo_a and shards MoE experts instead of splitting
-        # KV heads, so the kv-head divisibility check doesn't apply.
-        is_deepseek_v4 = command.model_card.base_model.startswith("DeepSeek V4")
-        kv_heads = command.model_card.num_key_value_heads
-        cycles_with_sufficient_memory = [
-            cycle
-            for cycle in cycles_with_sufficient_memory
-            if command.model_card.hidden_size % len(cycle) == 0
-            and (is_deepseek_v4 or kv_heads is None or kv_heads % len(cycle) == 0)
-        ]
-        if not cycles_with_sufficient_memory:
-            raise ValueError(
-                f"No tensor sharding found for model with "
-                f"hidden_size={command.model_card.hidden_size}"
-                f"{f', num_key_value_heads={kv_heads}' if kv_heads is not None else ''}"
-                f" across candidate cycles"
-            )
-    if command.sharding == Sharding.Pipeline and command.model_card.model_id == ModelId(
-        "mlx-community/DeepSeek-V3.1-8bit"
-    ):
-        raise ValueError(
-            "Pipeline parallelism is not supported for DeepSeek V3.1 (8-bit)"
-        )
-    if (
-        command.sharding == Sharding.Pipeline
-        and command.model_card.base_model.startswith("Gemma 4")
-    ):
-        cycles_with_sufficient_memory = [
-            cycle for cycle in cycles_with_sufficient_memory if len(cycle) == 1
-        ]
-        if not cycles_with_sufficient_memory:
-            raise ValueError(
-                "Pipeline parallelism is not supported for Gemma 4; use tensor parallelism instead."
-            )
-
-    smallest_cycles = get_smallest_cycles(cycles_with_sufficient_memory)
 
     required_backends = set(INSTANCE_META_BACKENDS[command.instance_meta]) & set(
         command.model_card.backends
