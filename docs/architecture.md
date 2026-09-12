@@ -471,4 +471,5 @@ may not be the behaviour you get.
 ---
 
 *Diagram sources live in [`imgs/architecture/`](imgs/architecture/) as standalone SVGs; they
-adapt to light and dark themes.*
+adapt to light and dark themes. [`audit.md`](audit.md) is the companion improvement audit — the
+same source read for defects rather than for structure.*
