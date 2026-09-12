@@ -15,7 +15,12 @@ from pathlib import Path
 from typing import Any, Literal
 
 import httpx
-from exo_tools.client import ExoClient, ExoHttpError
+from exo_tools.client import (
+    ExoClient,
+    ExoHttpError,
+    api_key_headers,
+    resolve_api_key,
+)
 from exo_tools.harness import (
     add_common_instance_args,
     capture_cluster_snapshot,
@@ -1066,7 +1071,7 @@ Examples:
         return task, scenario_results, buf.getvalue()
 
     try:
-        with httpx.Client() as http_client:
+        with httpx.Client(headers=api_key_headers(resolve_api_key())) as http_client:
             if args.concurrency == 1:
                 current_run = -1
                 for task in tasks:

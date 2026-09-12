@@ -2,6 +2,7 @@
   import "../app.css";
   import ToastContainer from "$lib/components/ToastContainer.svelte";
   import ConnectionBanner from "$lib/components/ConnectionBanner.svelte";
+  import ApiKeyModal from "$lib/components/ApiKeyModal.svelte";
 
   let { children } = $props();
 </script>
@@ -15,4 +16,5 @@
   <ConnectionBanner />
   {@render children?.()}
   <ToastContainer />
+  <ApiKeyModal />
 </div>

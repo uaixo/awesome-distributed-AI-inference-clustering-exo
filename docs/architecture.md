@@ -13,7 +13,7 @@ out in [§12](#12-sharp-edges).
 | | |
 |---|---|
 | **Shape** | ~76k lines, 4 languages — Python control plane, Rust transport, Svelte dashboard, Swift menubar app |
-| **Ports** | `52413` UDP discovery · `52414` zenoh TCP · `52415` HTTP API + dashboard |
+| **Ports** | `52413` UDP discovery · `52414` zenoh TCP · `52415` HTTP API + dashboard. Each binds every interface; the HTTP API requires a key, zenoh authenticates nothing |
 | **Coordination** | One elected master. No quorum, no lease, no consensus log — an epoch fence instead |
 | **Inference** | MLX, two strategies — pipeline (split layers) or tensor (split every matrix) |
 

@@ -129,6 +129,14 @@ EXO_MAX_CONCURRENT_REQUESTS = int(os.getenv("EXO_MAX_CONCURRENT_REQUESTS", "8"))
 EXO_API_ALLOWED_ORIGINS: tuple[str, ...] = _parse_comma_values(
     "EXO_API_ALLOWED_ORIGINS"
 )
+
+# The shared secret every API route requires, generated on first run. Kept beside
+# the other per-node cache state so it survives restarts.
+EXO_API_KEY_FILE = EXO_CACHE_HOME / "api_key"
+# Serve the API with no authentication. Only for a network the operator already
+# trusts: the API binds every interface, so this opens every route to any host
+# that can reach the node.
+EXO_API_AUTH_DISABLED = os.getenv("EXO_API_AUTH_DISABLED", "false").lower() == "true"
 if "*" in EXO_API_ALLOWED_ORIGINS:
     raise ValueError(
         "EXO_API_ALLOWED_ORIGINS must list explicit origins; '*' would expose the "

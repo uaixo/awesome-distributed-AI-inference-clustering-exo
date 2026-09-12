@@ -46,6 +46,11 @@ from exo.api.adapters.responses import (
     generate_responses_stream,
     responses_request_to_text_generation,
 )
+from exo.api.auth import (
+    BearerTokenMiddleware,
+    public_asset_names,
+    resolve_api_key,
+)
 from exo.api.keepalive import with_sse_keepalive
 from exo.api.types import (
     AddCustomModelParams,
@@ -129,6 +134,7 @@ from exo.shared.apply import apply
 from exo.shared.constants import (
     ENABLE_DISAGGREGATION,
     EXO_API_ALLOWED_ORIGINS,
+    EXO_API_KEY_FILE,
     EXO_CACHE_HOME,
     EXO_EVENT_LOG_DIR,
     EXO_IMAGE_CACHE_DIR,
@@ -302,8 +308,9 @@ class API:
             return await call_next(request)
 
         self._setup_exception_handlers()
-        self._setup_cors()
         self._setup_routes()
+        self._setup_auth()
+        self._setup_cors()
 
         self.app.mount(
             "/",
@@ -359,6 +366,35 @@ class API:
             )
         )
         return JSONResponse(err.model_dump(), status_code=exc.status_code)
+
+    def _setup_auth(self) -> None:
+        """Require the node's API key on every route except the public ones.
+
+        Registered before `_setup_cors` so `CORSMiddleware` stays outermost: a
+        browser attaches no credentials to a preflight, and a 401 carrying no
+        `Access-Control-Allow-Origin` is unreadable to the client that provoked it.
+
+        The route snapshot is taken here, before the dashboard mount is added, so
+        the mount is not mistaken for an API route. Any path the snapshot does not
+        cover is still protected unless it names a dashboard asset, so adding a
+        route cannot forget to protect it.
+        """
+        key = resolve_api_key()
+        if key is None:
+            return
+        self.app.add_middleware(
+            BearerTokenMiddleware,
+            key=key,
+            api_routes=tuple(self.app.routes),
+            asset_names=public_asset_names(dashboard_dir()),
+        )
+        logger.info(
+            "API authentication is on. Point a client at this node with:\n"
+            f"    export EXO_API_KEY=$(cat {EXO_API_KEY_FILE})\n"
+            "Set EXO_API_KEY before starting a node to choose the key yourself, "
+            "which is how every node in a cluster comes to share one, or "
+            "EXO_API_AUTH_DISABLED=true to serve the API without a key."
+        )
 
     def _setup_cors(self) -> None:
         """Allow cross-origin calls only from the origins the operator listed.

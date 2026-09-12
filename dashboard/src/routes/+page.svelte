@@ -70,6 +70,7 @@
   } from "$lib/stores/app.svelte";
   import { addToast, dismissByMessage } from "$lib/stores/toast.svelte";
   import HeaderNav from "$lib/components/HeaderNav.svelte";
+  import { apiFetch } from "$lib/api";
   import DeviceIcon from "$lib/components/DeviceIcon.svelte";
   import { fade, fly, slide } from "svelte/transition";
   import { tweened } from "svelte/motion";
@@ -675,7 +676,7 @@
       // ignore
     }
     // Persist to server (~/.exo)
-    fetch("/onboarding", { method: "POST" }).catch(() => {});
+    apiFetch("/onboarding", { method: "POST" }).catch(() => {});
     // Remove overlay after fade-out transition completes
     setTimeout(() => {
       onboardingFadingOut = false;
@@ -704,7 +705,7 @@
     const sharding = nodeCount <= 1 ? "Pipeline" : selectedSharding;
     const instanceType = nodeCount <= 1 ? "MlxRing" : selectedInstanceType;
     try {
-      const placementResponse = await fetch(
+      const placementResponse = await apiFetch(
         `/instance/placement?model_id=${encodeURIComponent(modelId)}&sharding=${sharding}&instance_meta=${instanceType}&min_nodes=1`,
       );
       if (!placementResponse.ok) {
@@ -714,7 +715,7 @@
         return;
       }
       const instanceData = await placementResponse.json();
-      const response = await fetch("/instance", {
+      const response = await apiFetch("/instance", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ instance: instanceData }),
@@ -1294,7 +1295,7 @@
   onMount(async () => {
     mounted = true;
     fetchModels();
-    fetch("/node_id")
+    apiFetch("/node_id")
       .then((r) => (r.ok ? r.json() : null))
       .then((id) => {
         if (id) localNodeId = id;
@@ -1326,7 +1327,7 @@
 
     // Check server-side onboarding state (persisted in ~/.exo)
     try {
-      const res = await fetch("/onboarding");
+      const res = await apiFetch("/onboarding");
       if (res.ok) {
         const data = await res.json();
         if (!data.completed) {
@@ -1358,7 +1359,7 @@
 
   async function fetchModels() {
     try {
-      const response = await fetch("/models");
+      const response = await apiFetch("/models");
       if (response.ok) {
         const data = await response.json();
         // API returns { data: [{ id, name }] } format
@@ -1375,7 +1376,7 @@
   }
 
   async function addModelFromPicker(modelId: string) {
-    const response = await fetch("/models/add", {
+    const response = await apiFetch("/models/add", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ model_id: modelId }),
@@ -1397,7 +1398,7 @@
 
   async function deleteCustomModel(modelId: string) {
     try {
-      const response = await fetch(
+      const response = await apiFetch(
         `/models/custom/${encodeURIComponent(modelId)}`,
         { method: "DELETE" },
       );
@@ -1431,14 +1432,14 @@
       let response: Response;
       if (preview?.instance) {
         // Launch with pre-computed placement from preview
-        response = await fetch("/instance", {
+        response = await apiFetch("/instance", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ instance: preview.instance }),
         });
       } else {
         // No preview available — use place_instance to let server decide placement
-        response = await fetch("/place_instance", {
+        response = await apiFetch("/place_instance", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -1986,7 +1987,7 @@
     const wasSelected = selectedChatModel() === deletedInstanceModelId;
 
     try {
-      const response = await fetch(`/instance/${instanceId}`, {
+      const response = await apiFetch(`/instance/${instanceId}`, {
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
       });
@@ -2776,7 +2777,7 @@
 
     try {
       // Fetch placement previews
-      const res = await fetch(
+      const res = await apiFetch(
         `/instance/previews?model_id=${encodeURIComponent(modelId)}`,
       );
       if (!res.ok) {
@@ -2799,7 +2800,7 @@
       }
 
       // Launch the instance
-      const launchRes = await fetch("/instance", {
+      const launchRes = await apiFetch("/instance", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ instance: placement.instance }),
@@ -2916,7 +2917,7 @@
     chatLaunchState = "launching";
 
     try {
-      const res = await fetch(
+      const res = await apiFetch(
         `/instance/previews?model_id=${encodeURIComponent(autoModel.id)}`,
       );
       if (!res.ok) {
@@ -2935,7 +2936,7 @@
         return;
       }
 
-      const launchRes = await fetch("/instance", {
+      const launchRes = await apiFetch("/instance", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ instance: placement.instance }),

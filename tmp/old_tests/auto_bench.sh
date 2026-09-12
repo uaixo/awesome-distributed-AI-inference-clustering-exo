@@ -40,7 +40,9 @@ done
 
 for host; do
   echo "Waiting for $host..." 1>&2
-  until curl -sf "http://$host:52415/models" &>/dev/null; do sleep 1; done
+  # /node_id, not /models: the API requires its key on every other route, and
+  # curl -sf treats the 401 as a failure, so a gate on /models never returns.
+  until curl -sf "http://$host:52415/node_id" &>/dev/null; do sleep 1; done
 done
 
 echo "Waiting 30s for cluster setup" 1>&2

@@ -9,6 +9,9 @@
 
 import { browser } from "$app/environment";
 
+import { apiFetch } from "$lib/api";
+import { apiKeyStore } from "$lib/stores/apiKey.svelte";
+
 // UUID generation fallback for browsers without crypto.randomUUID
 function generateUUID(): string {
   if (
@@ -1284,7 +1287,12 @@ class AppStore {
   startPolling() {
     this.fetchState();
     this.fetchFeatureFlags();
-    this.fetchInterval = setInterval(() => this.fetchState(), 1000);
+    this.fetchInterval = setInterval(() => {
+      // Idle while the key prompt is up: the node refuses every request until
+      // it is answered, so a 401 a second only buries the console.
+      if (apiKeyStore.isRequired) return;
+      this.fetchState();
+    }, 1000);
   }
 
   stopPolling() {
@@ -1297,7 +1305,7 @@ class AppStore {
 
   async fetchFeatureFlags() {
     try {
-      const response = await fetch("/v1/feature-flags");
+      const response = await apiFetch("/v1/feature-flags");
       if (!response.ok) return;
       this.featureFlags = await response.json();
     } catch {
@@ -1307,7 +1315,12 @@ class AppStore {
 
   async fetchState() {
     try {
-      const response = await fetch("/state");
+      const response = await apiFetch("/state");
+      if (response.status === 401) {
+        // The key prompt is up; leave the connection banner alone, since the
+        // node is answering and only this request is refused.
+        return;
+      }
       if (!response.ok) {
         throw new Error(`Failed to fetch state: ${response.status}`);
       }
@@ -1385,7 +1398,7 @@ class AppStore {
           url += `&node_ids=${encodeURIComponent(nodeId)}`;
         }
       }
-      const response = await fetch(url);
+      const response = await apiFetch(url);
       if (!response.ok) {
         throw new Error(
           `Failed to fetch placement previews: ${response.status}`,
@@ -1412,6 +1425,7 @@ class AppStore {
 
     // Then poll every 15 seconds (don't show loading spinner for subsequent fetches)
     this.previewsInterval = setInterval(() => {
+      if (apiKeyStore.isRequired) return;
       if (this.selectedPreviewModelId) {
         this.fetchPlacementPreviews(this.selectedPreviewModelId, false);
       }
@@ -1716,7 +1730,7 @@ class AppStore {
       let firstTokenTime: number | null = null;
       let tokenCount = tokensToKeep.length;
 
-      const response = await fetch("/v1/chat/completions", {
+      const response = await apiFetch("/v1/chat/completions", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1939,7 +1953,7 @@ class AppStore {
         return;
       }
 
-      const response = await fetch("/v1/chat/completions", {
+      const response = await apiFetch("/v1/chat/completions", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -2512,7 +2526,7 @@ class AppStore {
       const abortController = new AbortController();
       this.currentAbortController = abortController;
 
-      const response = await fetch("/v1/chat/completions", {
+      const response = await apiFetch("/v1/chat/completions", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -2831,7 +2845,7 @@ class AppStore {
         };
       }
 
-      const response = await fetch("/v1/images/generations", {
+      const response = await apiFetch("/v1/images/generations", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -3122,7 +3136,7 @@ class AppStore {
         );
       }
 
-      const apiResponse = await fetch("/v1/images/edits", {
+      const apiResponse = await apiFetch("/v1/images/edits", {
         method: "POST",
         body: formData,
         signal: abortController.signal,
@@ -3293,7 +3307,7 @@ class AppStore {
    */
   async startDownload(nodeId: string, shardMetadata: object): Promise<void> {
     try {
-      const response = await fetch("/download/start", {
+      const response = await apiFetch("/download/start", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -3318,7 +3332,7 @@ class AppStore {
    */
   async cancelDownload(nodeId: string, modelId: string): Promise<void> {
     try {
-      const response = await fetch("/download/cancel", {
+      const response = await apiFetch("/download/cancel", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -3342,7 +3356,7 @@ class AppStore {
     prefillInstances: string[],
     decodeInstances: string[],
   ): Promise<void> {
-    const response = await fetch("/v1/instance-links", {
+    const response = await apiFetch("/v1/instance-links", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -3362,7 +3376,7 @@ class AppStore {
     prefillInstances: string[],
     decodeInstances: string[],
   ): Promise<void> {
-    const response = await fetch(
+    const response = await apiFetch(
       `/v1/instance-links/${encodeURIComponent(linkId)}`,
       {
         method: "PUT",
@@ -3381,7 +3395,7 @@ class AppStore {
   }
 
   async deleteInstanceLink(linkId: string): Promise<void> {
-    const response = await fetch(
+    const response = await apiFetch(
       `/v1/instance-links/${encodeURIComponent(linkId)}`,
       { method: "DELETE" },
     );
@@ -3397,7 +3411,7 @@ class AppStore {
    */
   async deleteDownload(nodeId: string, modelId: string): Promise<void> {
     try {
-      const response = await fetch(
+      const response = await apiFetch(
         `/download/${encodeURIComponent(nodeId)}/${encodeURIComponent(modelId)}`,
         {
           method: "DELETE",
@@ -3419,7 +3433,7 @@ class AppStore {
    * List all available traces
    */
   async listTraces(): Promise<TraceListResponse> {
-    const response = await fetch("/v1/traces");
+    const response = await apiFetch("/v1/traces");
     if (!response.ok) {
       throw new Error(`Failed to list traces: ${response.status}`);
     }
@@ -3431,7 +3445,9 @@ class AppStore {
    */
   async checkTraceExists(taskId: string): Promise<boolean> {
     try {
-      const response = await fetch(`/v1/traces/${encodeURIComponent(taskId)}`);
+      const response = await apiFetch(
+        `/v1/traces/${encodeURIComponent(taskId)}`,
+      );
       return response.ok;
     } catch {
       return false;
@@ -3442,7 +3458,7 @@ class AppStore {
    * Get computed statistics for a task's trace
    */
   async fetchTraceStats(taskId: string): Promise<TraceStatsResponse> {
-    const response = await fetch(
+    const response = await apiFetch(
       `/v1/traces/${encodeURIComponent(taskId)}/stats`,
     );
     if (!response.ok) {
@@ -3457,7 +3473,7 @@ class AppStore {
   async deleteTraces(
     taskIds: string[],
   ): Promise<{ deleted: string[]; notFound: string[] }> {
-    const response = await fetch("/v1/traces/delete", {
+    const response = await apiFetch("/v1/traces/delete", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ taskIds }),
@@ -3602,6 +3618,15 @@ export const setMobileRightSidebarOpen = (open: boolean) =>
   appStore.setMobileRightSidebarOpen(open);
 
 export const refreshState = () => appStore.fetchState();
+/**
+ * Re-read everything a refused request could not, now that the node accepts the
+ * key. Feature flags are fetched once at startup, so without this the dashboard
+ * would keep the all-disabled defaults until the next reload.
+ */
+export const refreshAfterAuthentication = () => {
+  void appStore.fetchFeatureFlags();
+  void appStore.fetchState();
+};
 
 // Connection status
 export const isConnected = () => appStore.isConnected;

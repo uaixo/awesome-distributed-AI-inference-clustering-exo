@@ -756,7 +756,9 @@ def main() -> int:
                             ) -> tuple[dict[str, Any], int]:
                                 nonlocal batch_t0
                                 c = ExoClient(
-                                    args.host, args.port, timeout_s=args.timeout
+                                    args.host,
+                                    args.port,
+                                    timeout_s=args.timeout,
                                 )
                                 if _barrier.wait() == 0:
                                     batch_t0 = time.perf_counter()

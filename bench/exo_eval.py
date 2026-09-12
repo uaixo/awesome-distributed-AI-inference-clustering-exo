@@ -42,7 +42,12 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from exo_tools.client import ExoClient, ExoHttpError
+from exo_tools.client import (
+    ExoClient,
+    ExoHttpError,
+    api_key_headers,
+    resolve_api_key,
+)
 from exo_tools.harness import (
     add_common_instance_args,
     capture_cluster_snapshot,
@@ -607,7 +612,7 @@ async def _call_api(
 async def _check_instance_health(base_url: str) -> bool:
     """Return True if the exo instance is still reachable."""
     try:
-        async with httpx.AsyncClient() as c:
+        async with httpx.AsyncClient(headers=api_key_headers(resolve_api_key())) as c:
             resp = await c.get(f"{base_url}/models", timeout=5.0)
             return resp.status_code == 200
     except Exception:
@@ -1041,7 +1046,9 @@ async def evaluate_benchmark(
                     return
             await asyncio.sleep(5)
 
-    async with httpx.AsyncClient() as http_client:
+    async with httpx.AsyncClient(
+        headers=api_key_headers(resolve_api_key())
+    ) as http_client:
         monitor = asyncio.create_task(_health_monitor())
         tasks = [process_question(i, doc, http_client) for i, doc in enumerate(ds)]
         await asyncio.gather(*tasks)
