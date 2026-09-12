@@ -2,8 +2,17 @@ name: macos-app
 
 # The nix pipeline never opens app/EXO: Xcode is the only thing that compiles it,
 # so a Swift change reaches a release build unchecked. This job compiles the app
-# and its tests, runs the unit tests, then compiles again in the Release
-# configuration build-app.yml ships, on the Xcode that workflow pins.
+# and its tests, runs the tests against a real node, then compiles again in the
+# Release configuration build-app.yml ships, on the Xcode that workflow pins.
+#
+# The node is here because the two halves of the API key were only ever tested
+# apart: the Python suite proves the middleware, EXOTests proves the app's
+# resolution with every source injected, and neither meets the other.
+# RealNodeIntegrationTests closes that, and skips itself when no node is
+# listening, so this job has to start one and fail if it never answers.
+# The node needs its Python dependencies and the built dashboard, which is where
+# it serves static assets from and how the middleware learns which paths are
+# public. It does not need the mlx extra: nothing on the startup path imports it.
 #
 # Signing is ad-hoc (identity "-"), which needs no certificate and no team while
 # still attaching EXO.entitlements.
@@ -57,6 +66,24 @@ jobs:
           xcodebuild -version
           swift --version
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install the node's Python dependencies
+        working-directory: ${{ github.workspace }}
+        run: |
+          uv python install
+          uv sync --locked
+
+      - name: Build the dashboard the node serves
+        working-directory: ${{ github.workspace }}/dashboard
+        run: |
+          npm ci
+          npm run build
+
       - name: Stand in for the PyInstaller runtime
         run: mkdir -p ../../dist/exo && touch ../../dist/exo/placeholder
 
@@ -73,14 +100,58 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=YES
 
-      - name: Run the unit tests
+      - name: Start a node for the integration tests
+        working-directory: ${{ github.workspace }}
         run: |
+          uv run exo -v >/tmp/exo-node.log 2>&1 &
+          echo "EXO_NODE_PID=$!" >> "$GITHUB_ENV"
+          for _ in $(seq 1 120); do
+            curl -sf -o /dev/null http://127.0.0.1:52415/node_id && break
+            sleep 1
+          done
+          if ! curl -sf -o /dev/null http://127.0.0.1:52415/node_id; then
+            echo "The node never answered /node_id, so the integration tests would skip."
+            tail -60 /tmp/exo-node.log
+            exit 1
+          fi
+          if [ ! -s "$HOME/.exo/api_key" ]; then
+            echo "The node answered but wrote no key file, so it is not enforcing one."
+            tail -60 /tmp/exo-node.log
+            exit 1
+          fi
+
+      - name: Run the tests
+        run: |
+          set -o pipefail
           xcodebuild test-without-building \
             -scheme EXO \
             -configuration Debug \
             -destination 'platform=macOS,arch=arm64' \
             -derivedDataPath build \
-            -only-testing:EXOTests
+            -only-testing:EXOTests | tee /tmp/exo-xctest.log
+
+      # A suite that skips itself reports success, so the skip has to be caught here:
+      # the step above only reaches this point with a node up, which is the suite's
+      # own condition, so anything other than "ran" means the condition misread it.
+      - name: Check the integration tests actually ran
+        run: |
+          if ! grep -q "RealNodeIntegrationTests/theStateServiceFillsFromARealNode.*passed" \
+            /tmp/exo-xctest.log; then
+            echo "The real-node integration tests did not run against the node this job started."
+            grep "RealNodeIntegrationTests" /tmp/exo-xctest.log || echo "(no mention of the suite at all)"
+            exit 1
+          fi
+
+      - name: Show what the node logged
+        if: failure()
+        run: tail -80 /tmp/exo-node.log
+
+      - name: Stop the node
+        if: always()
+        run: |
+          if [ -n "${EXO_NODE_PID:-}" ]; then
+            kill "$EXO_NODE_PID" 2>/dev/null || true
+          fi
 
       - name: Build the app the way a release builds it
         run: |
