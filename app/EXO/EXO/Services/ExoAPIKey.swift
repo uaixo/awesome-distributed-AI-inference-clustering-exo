@@ -7,16 +7,21 @@ import Foundation
 /// app is what starts it, so the value is looked up lazily and re-read whenever
 /// it is still missing rather than captured once at launch.
 ///
-/// An operator who sets `EXO_API_KEY` in Settings chooses the node's key instead,
-/// and the node then writes no file, so that value is read from the same place
-/// `ExoProcessController` reads it when building the child process environment.
+/// An operator who sets `EXO_API_KEY` chooses the node's key instead, and the node
+/// then writes no file. The three sources here are the three `ExoProcessController`
+/// composes into the child environment, in the precedence that method gives them:
+/// a Settings row wins, since those are applied last as overrides; otherwise the
+/// environment this app itself inherited, which seeds the child's; otherwise the
+/// file. Reading fewer of them than the node does would leave the app holding no
+/// key while the node has one.
 enum ExoAPIKey {
     private static let fileURL = URL(fileURLWithPath: NSHomeDirectory())
         .appendingPathComponent(".exo")
         .appendingPathComponent("api_key")
 
     private static let lock = NSLock()
-    private static var cached: String?
+    /// Guarded by `lock`, which is what makes the shared mutable state safe.
+    nonisolated(unsafe) private static var cached: String?
 
     /// The node's key, or nil when it has not written one and none is configured.
     static var current: String? {
@@ -25,7 +30,7 @@ enum ExoAPIKey {
         if let cached {
             return cached
         }
-        guard let key = configuredKey() ?? storedKey() else {
+        guard let key = configuredKey() ?? inheritedKey() ?? storedKey() else {
             return nil
         }
         cached = key
@@ -54,6 +59,11 @@ enum ExoAPIKey {
             $0.key.trimmingCharacters(in: .whitespaces) == "EXO_API_KEY"
         }
         return nonEmpty(match?.value)
+    }
+
+    /// The key from this app's own environment, which seeds the node's.
+    private static func inheritedKey() -> String? {
+        nonEmpty(ProcessInfo.processInfo.environment["EXO_API_KEY"])
     }
 
     /// The key from the file the node writes on first run.
