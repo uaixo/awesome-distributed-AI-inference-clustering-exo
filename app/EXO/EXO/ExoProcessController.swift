@@ -12,12 +12,18 @@ private let onboardingCompletedKey = "EXOOnboardingCompleted"
 private let defaultModelsDirKey = "EXODefaultModelsDir"
 private let additionalModelsDirsKey = "EXOAdditionalModelsDirs"
 private let readOnlyModelsDirsKey = "EXOReadOnlyModelsDirs"
-private let customEnvironmentVariablesKey = "EXOCustomEnvironmentVariables"
+private let customEnvironmentVariablesKey = CustomEnvironmentVariable.storageKey
 
 /// A user-defined environment variable that is injected into the exo child
 /// process at launch. Used as an escape hatch for env vars that don't have
 /// first-class typed UI in Settings.
 struct CustomEnvironmentVariable: Codable, Identifiable, Equatable {
+    /// The UserDefaults key holding these rows, as a JSON array.
+    ///
+    /// Shared with `ExoAPIKey`, which reads the `EXO_API_KEY` row out of the same
+    /// store. Renaming it orphans every row a user has saved.
+    static let storageKey = "EXOCustomEnvironmentVariables"
+
     var id: UUID
     var key: String
     var value: String

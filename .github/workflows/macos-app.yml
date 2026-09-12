@@ -1,0 +1,96 @@
+name: macos-app
+
+# The nix pipeline never opens app/EXO: Xcode is the only thing that compiles it,
+# so a Swift change reaches a release build unchecked. This job compiles the app
+# and its tests, runs the unit tests, then compiles again in the Release
+# configuration build-app.yml ships, on the Xcode that workflow pins.
+#
+# Signing is ad-hoc (identity "-"), which needs no certificate and no team while
+# still attaching EXO.entitlements.
+#
+# Both test bundles are built and only EXOTests runs, because -only-testing
+# restricts what runs, not what builds. EXOUITests is left unrun: it drives the app
+# through the accessibility APIs, which needs an approval nobody is there to give.
+# EXOTests is app-hosted, so running it does launch EXO; what that launch would
+# otherwise start is skipped in a test process, see EXO/RunningUnderTests.swift.
+#
+# Two settings exist only to make a build possible outside the release pipeline:
+# Copy Bundle Resources pulls in dist/exo, the PyInstaller runtime that build-app.yml
+# produces before it calls xcodebuild, so an empty directory stands in for it here;
+# and ENABLE_DEBUG_DYLIB=NO drops the SwiftUI preview dylib, whose link step failed
+# here and which nothing on a runner previews.
+
+on:
+  push:
+    paths:
+      - "app/**"
+      - ".github/workflows/macos-app.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: Build and test the macOS app
+    runs-on: macos-26
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: app/EXO
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          lfs: false
+
+      - name: Select the Xcode the release pipeline pins
+        run: |
+          if [ -d /Applications/Xcode_26.2.app ]; then
+            sudo xcode-select -s /Applications/Xcode_26.2.app
+          else
+            echo "Xcode_26.2.app is absent from this image; using its default Xcode."
+          fi
+
+      - name: Record the toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: Stand in for the PyInstaller runtime
+        run: mkdir -p ../../dist/exo && touch ../../dist/exo/placeholder
+
+      - name: Build the app and the tests
+        run: |
+          xcodebuild build-for-testing \
+            -scheme EXO \
+            -configuration Debug \
+            -destination 'platform=macOS,arch=arm64' \
+            -derivedDataPath build \
+            ENABLE_DEBUG_DYLIB=NO \
+            CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_IDENTITY=- \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=YES
+
+      - name: Run the unit tests
+        run: |
+          xcodebuild test-without-building \
+            -scheme EXO \
+            -configuration Debug \
+            -destination 'platform=macOS,arch=arm64' \
+            -derivedDataPath build \
+            -only-testing:EXOTests
+
+      - name: Build the app the way a release builds it
+        run: |
+          xcodebuild build \
+            -scheme EXO \
+            -configuration Release \
+            -destination 'platform=macOS,arch=arm64' \
+            -derivedDataPath build \
+            ENABLE_DEBUG_DYLIB=NO \
+            CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_IDENTITY=- \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=YES

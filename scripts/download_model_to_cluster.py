@@ -24,6 +24,7 @@ from typing import Any
 import httpx
 from loguru import logger
 
+from exo.api.auth import api_key_headers, read_api_key_if_present
 from exo.shared.models.model_cards import ModelCard, ModelId
 from exo.shared.types.worker.shards import PipelineShardMetadata
 
@@ -167,7 +168,9 @@ async def run(args: argparse.Namespace) -> int:
 
     shard_payload = build_shard_payload(card)
 
-    async with httpx.AsyncClient(timeout=args.timeout) as client:
+    async with httpx.AsyncClient(
+        timeout=args.timeout, headers=api_key_headers(read_api_key_if_present())
+    ) as client:
         await ensure_model_card_registered(client, base, model_id)
 
         node_ids = await fetch_topology_nodes(client, base)

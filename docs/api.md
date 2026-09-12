@@ -12,6 +12,21 @@ Base URL example:
 http://localhost:52415
 ```
 
+## 0. Authentication
+
+Every endpoint below except `GET /node_id` requires the node's API key. The node generates one the first time it starts and stores it in its cache directory, `~/.exo/api_key` on macOS and `~/.cache/exo/api_key` on Linux; set `EXO_API_KEY` before starting a node to choose the key instead, which is how the nodes of one cluster come to share one.
+
+Present it as a bearer token, or as `x-api-key` for Anthropic-style clients:
+
+```
+Authorization: Bearer <key>
+x-api-key: <key>
+```
+
+A request with no key, a wrong key, or both headers at once is answered with `401 Unauthorized` and a `WWW-Authenticate: Bearer` header, in the same error format as every other failure. `EXO_API_AUTH_DISABLED=true` serves every endpoint with no key, which is safe only on a network you already trust, since the API binds every interface.
+
+`GET /node_id` stays public because a node probes a peer's `/node_id` to measure the network profile, before it could hold that peer's key.
+
 ## 1. General / Meta Endpoints
 
 ### Get Master Node ID

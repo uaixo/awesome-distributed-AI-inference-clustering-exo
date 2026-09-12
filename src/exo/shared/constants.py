@@ -35,6 +35,13 @@ EXO_DEFAULT_MODELS_DIR = (
 )
 
 
+def _parse_comma_values(env_var: str) -> tuple[str, ...]:
+    raw = os.environ.get(env_var, None)
+    if raw is None:
+        return ()
+    return tuple(value.strip() for value in raw.split(",") if value.strip())
+
+
 def _parse_colon_dirs(env_var: str) -> tuple[Path, ...]:
     raw = os.environ.get(env_var, None)
     if raw is None:
@@ -114,5 +121,28 @@ EXO_TRACING_ENABLED = os.getenv("EXO_TRACING_ENABLED", "false").lower() == "true
 ENABLE_DISAGGREGATION = os.getenv("ENABLE_DISAGGREGATION", "false").lower() == "true"
 
 EXO_MAX_CONCURRENT_REQUESTS = int(os.getenv("EXO_MAX_CONCURRENT_REQUESTS", "8"))
+
+# Browser origins allowed to call the API cross-origin, comma-separated. Empty by
+# default: the dashboard is served from the same origin as the API, so nothing
+# the node ships needs a CORS header. "*" is refused because it would let any
+# page a user visits read the event log, which carries every prompt and reply.
+EXO_API_ALLOWED_ORIGINS: tuple[str, ...] = _parse_comma_values(
+    "EXO_API_ALLOWED_ORIGINS"
+)
+
+# The shared secret every API route requires, generated on first run. Kept beside
+# the other per-node cache state so it survives restarts. The macOS app reads the
+# same file to talk to the node it launched: see ExoAPIKey.fileURL in
+# app/EXO/EXO/Services/ExoAPIKey.swift, which hardcodes the default path.
+EXO_API_KEY_FILE = EXO_CACHE_HOME / "api_key"
+# Serve the API with no authentication. Only for a network the operator already
+# trusts: the API binds every interface, so this opens every route to any host
+# that can reach the node.
+EXO_API_AUTH_DISABLED = os.getenv("EXO_API_AUTH_DISABLED", "false").lower() == "true"
+if "*" in EXO_API_ALLOWED_ORIGINS:
+    raise ValueError(
+        "EXO_API_ALLOWED_ORIGINS must list explicit origins; '*' would expose the "
+        "API to every page the user visits"
+    )
 
 EXO_MAX_INSTANCE_RETRIES = 5

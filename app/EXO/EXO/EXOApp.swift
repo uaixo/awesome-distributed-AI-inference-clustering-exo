@@ -48,13 +48,34 @@ struct EXOApp: App {
         _thunderboltBridgeService = StateObject(wrappedValue: thunderboltBridge)
         _settingsWindowController = StateObject(wrappedValue: SettingsWindowController())
         _bugReportWindowController = StateObject(wrappedValue: BugReportWindowController())
+        guard !isRunningTests else {
+            return
+        }
+        startSession(
+            controller: controller,
+            stateService: service,
+            networkStatus: networkStatus,
+            localNetwork: localNetwork
+        )
+    }
+
+    /// Start the login item, the network-setup prompt, the node and the pollers.
+    ///
+    /// Skipped entirely in a test process, where none of them has anyone to answer
+    /// them and the prompt would block the run: see `isRunningTests`.
+    private func startSession(
+        controller: ExoProcessController,
+        stateService: ClusterStateService,
+        networkStatus: NetworkStatusService,
+        localNetwork: LocalNetworkChecker
+    ) {
         enableLaunchAtLoginIfNeeded()
         // Install LaunchDaemon to disable Thunderbolt Bridge on startup (prevents network loops)
         NetworkSetupHelper.promptAndInstallIfNeeded()
         // Check local network access periodically (warning disappears when user grants permission)
         localNetwork.startPeriodicChecking(interval: 10)
         controller.scheduleLaunch(after: 5)
-        service.startPolling()
+        stateService.startPolling()
         networkStatus.startPolling()
     }
 
@@ -182,11 +203,16 @@ final class SparkleUpdater: NSObject, ObservableObject {
         let proxy = ExoUpdaterDelegate(processController: processController)
         delegateProxy = proxy
         controller = SPUStandardUpdaterController(
-            startingUpdater: true,
+            startingUpdater: !isRunningTests,
             updaterDelegate: proxy,
             userDriverDelegate: nil
         )
         super.init()
+        // A test process has no registered bundle for the notification centre and
+        // nobody to answer an update prompt: see `isRunningTests`.
+        guard !isRunningTests else {
+            return
+        }
         let center = UNUserNotificationCenter.current()
         center.delegate = notificationDelegate
         center.requestAuthorization(options: [.alert, .sound]) { _, _ in }

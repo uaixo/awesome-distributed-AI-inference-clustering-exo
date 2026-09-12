@@ -239,9 +239,31 @@ async def ensure_cache_dir(model_id: ModelId) -> Path:
     return target
 
 
+def model_dir_name(model_id: ModelId) -> str:
+    """Return the single directory name `model_id` maps to, refusing path syntax.
+
+    `ModelId.parse` rejects traversal where payloads are deserialised. This
+    repeats the check at the one place a model id reaches `shutil.rmtree`, so a
+    caller that constructs `ModelId` directly cannot delete outside the models
+    directories.
+
+    Raises:
+        ValueError: the normalized name is a path reference rather than a name.
+    """
+    normalized = model_id.normalize()
+    separators = (os.sep, os.altsep) if os.altsep else (os.sep,)
+    if normalized in (os.curdir, os.pardir) or any(
+        separator in normalized for separator in separators
+    ):
+        raise ValueError(
+            f"model id {model_id!r} normalizes to {normalized!r}, which is not a directory name"
+        )
+    return normalized
+
+
 async def delete_model(model_id: ModelId) -> bool:
     """Delete a model from writable directories. Skips read-only dirs."""
-    normalized = model_id.normalize()
+    normalized = model_dir_name(model_id)
     deleted = False
     for models_dir in EXO_MODELS_DIRS:
         model_dir = models_dir / normalized

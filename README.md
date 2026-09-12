@@ -322,6 +322,9 @@ exo supports several environment variables for configuration:
 | `EXO_LIBP2P_NAMESPACE` | Custom namespace for cluster isolation | None |
 | `EXO_FAST_SYNCH` | Control MLX_METAL_FAST_SYNCH behavior (for JACCL backend) | Auto |
 | `EXO_TRACING_ENABLED` | Enable distributed tracing for performance analysis | `false` |
+| `EXO_API_ALLOWED_ORIGINS` | Comma-separated browser origins allowed to call the API cross-origin. The dashboard is served from the same origin as the API, so it needs none. `*` is refused. | None |
+| `EXO_API_KEY` | The key every API route requires. Set it before starting a node to choose the key yourself, which is how the nodes of one cluster come to share one; leave it unset and the node generates a key on first run. Also the variable a client reads. | Generated |
+| `EXO_API_AUTH_DISABLED` | Serve every API route with no key. Only for a network you already trust: the API binds every interface. | `false` |
 
 **Example usage:**
 
@@ -344,6 +347,30 @@ EXO_LIBP2P_NAMESPACE=my-dev-cluster uv run exo
 
 ---
 
+### Authentication
+
+Every API route except `/node_id` requires the node's key, so that a host on the same network cannot read your conversations, launch models on your hardware, or delete your downloads. The node generates a key the first time it starts and stores it in its cache directory, `~/.exo/api_key` on macOS and `~/.cache/exo/api_key` on Linux, readable only by you.
+
+The dashboard asks for the key once and remembers it in that browser. For everything else, export it with the line the node prints at startup:
+
+```bash
+export EXO_API_KEY=$(cat ~/.exo/api_key)
+```
+
+Clients send it as a bearer token, or as `x-api-key` for Anthropic-style clients:
+
+```bash
+curl -H "Authorization: Bearer $EXO_API_KEY" http://localhost:52415/state
+```
+
+Each node generates its own key, so set `EXO_API_KEY` before starting the nodes of a cluster to give them one key. A node started that way writes no key file and uses the key you set.
+
+`EXO_API_AUTH_DISABLED=true` serves every route with no key at all. It is the right setting only for a network you already trust, since the API binds every interface.
+
+This protects the HTTP API. The zenoh control plane on port 52414 carries the same events and accepts the same commands with no authentication, so a key here closes the browser path and casual HTTP access, not a determined host on the same network.
+
+---
+
 ### Using the API
 
 exo provides multiple API-compatible interfaces for maximum compatibility with existing tools:
@@ -362,7 +389,7 @@ If you prefer to interact with exo via the API, here is an example creating an i
 The `/instance/previews` endpoint will preview all valid placements for your model.
 
 ```bash
-curl "http://localhost:52415/instance/previews?model_id=llama-3.2-1b"
+curl -H "Authorization: Bearer $EXO_API_KEY" "http://localhost:52415/instance/previews?model_id=llama-3.2-1b"
 ```
 
 Sample response:
@@ -387,7 +414,7 @@ This will return all valid placements for this model. Pick a placement that you 
 To pick the first one, pipe into `jq`:
 
 ```bash
-curl "http://localhost:52415/instance/previews?model_id=llama-3.2-1b" | jq -c '.previews[] | select(.error == null) | .instance' | head -n1
+curl -H "Authorization: Bearer $EXO_API_KEY" "http://localhost:52415/instance/previews?model_id=llama-3.2-1b" | jq -c '.previews[] | select(.error == null) | .instance' | head -n1
 ```
 
 ---
@@ -398,6 +425,7 @@ Send a POST to `/instance` with your desired placement in the `instance` field (
 
 ```bash
 curl -X POST http://localhost:52415/instance \
+  -H "Authorization: Bearer $EXO_API_KEY" \
   -H 'Content-Type: application/json' \
   -d '{
     "instance": {...}
@@ -418,7 +446,7 @@ This command is asynchronous. Before sending inference requests, wait until the
 API sees the new instance for this model:
 
 ```bash
-curl -N "http://localhost:52415/instance/await?model_id=mlx-community/Llama-3.2-1B-Instruct-4bit"
+curl -N -H "Authorization: Bearer $EXO_API_KEY" "http://localhost:52415/instance/await?model_id=mlx-community/Llama-3.2-1B-Instruct-4bit"
 ```
 
 The endpoint returns an SSE stream. A successful wait emits a message with
@@ -434,6 +462,7 @@ Now, make a POST to `/v1/chat/completions` (the same format as OpenAI's API):
 
 ```bash
 curl -N -X POST http://localhost:52415/v1/chat/completions \
+  -H "Authorization: Bearer $EXO_API_KEY" \
   -H 'Content-Type: application/json' \
   -d '{
     "model": "mlx-community/Llama-3.2-1B-Instruct-4bit",
@@ -451,7 +480,7 @@ curl -N -X POST http://localhost:52415/v1/chat/completions \
 When you're done, delete the instance by its ID (find it via `/state` or `/instance` endpoints):
 
 ```bash
-curl -X DELETE http://localhost:52415/instance/YOUR_INSTANCE_ID
+curl -X DELETE -H "Authorization: Bearer $EXO_API_KEY" http://localhost:52415/instance/YOUR_INSTANCE_ID
 ```
 
 ### Claude Messages API Compatibility
@@ -460,6 +489,7 @@ Use the Claude Messages API format with the `/v1/messages` endpoint:
 
 ```bash
 curl -N -X POST http://localhost:52415/v1/messages \
+  -H "Authorization: Bearer $EXO_API_KEY" \
   -H 'Content-Type: application/json' \
   -d '{
     "model": "mlx-community/Llama-3.2-1B-Instruct-4bit",
@@ -477,6 +507,7 @@ Use the OpenAI Responses API format with the `/v1/responses` endpoint:
 
 ```bash
 curl -N -X POST http://localhost:52415/v1/responses \
+  -H "Authorization: Bearer $EXO_API_KEY" \
   -H 'Content-Type: application/json' \
   -d '{
     "model": "mlx-community/Llama-3.2-1B-Instruct-4bit",
@@ -494,6 +525,7 @@ exo supports Ollama API endpoints for compatibility with tools like OpenWebUI:
 ```bash
 # Ollama chat
 curl -X POST http://localhost:52415/ollama/api/chat \
+  -H "Authorization: Bearer $EXO_API_KEY" \
   -H 'Content-Type: application/json' \
   -d '{
     "model": "mlx-community/Llama-3.2-1B-Instruct-4bit",
@@ -504,7 +536,7 @@ curl -X POST http://localhost:52415/ollama/api/chat \
   }'
 
 # List models (Ollama format)
-curl http://localhost:52415/ollama/api/tags
+curl -H "Authorization: Bearer $EXO_API_KEY" http://localhost:52415/ollama/api/tags
 ```
 
 ### Custom Model Loading from HuggingFace
@@ -513,6 +545,7 @@ You can add custom models from the HuggingFace hub:
 
 ```bash
 curl -X POST http://localhost:52415/models/add \
+  -H "Authorization: Bearer $EXO_API_KEY" \
   -H 'Content-Type: application/json' \
   -d '{
     "model_id": "mlx-community/my-custom-model"
@@ -525,10 +558,10 @@ Custom models requiring `trust_remote_code` in their configuration must be expli
 
 **Other useful API endpoints*:**
 
-- List all models: `curl http://localhost:52415/models`
-- List downloaded models only: `curl http://localhost:52415/models?status=downloaded`
-- Search HuggingFace: `curl "http://localhost:52415/models/search?query=llama&limit=10"`
-- Inspect instance IDs and deployment state: `curl http://localhost:52415/state`
+- List all models: `curl -H "Authorization: Bearer $EXO_API_KEY" http://localhost:52415/models`
+- List downloaded models only: `curl -H "Authorization: Bearer $EXO_API_KEY" http://localhost:52415/models?status=downloaded`
+- Search HuggingFace: `curl -H "Authorization: Bearer $EXO_API_KEY" "http://localhost:52415/models/search?query=llama&limit=10"`
+- Inspect instance IDs and deployment state: `curl -H "Authorization: Bearer $EXO_API_KEY" http://localhost:52415/state`
 
 For further details, see:
 

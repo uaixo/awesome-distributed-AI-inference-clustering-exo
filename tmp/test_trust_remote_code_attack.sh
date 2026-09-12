@@ -13,6 +13,14 @@ ENCODED_MODEL_ID=$(
 CUSTOM_CARDS_DIR="$HOME/.exo/custom_model_cards"
 CARD_FILE="$CUSTOM_CARDS_DIR/KevTheHermit--security-testing.toml"
 
+# The API requires its key on every route but /node_id. Export EXO_API_KEY with
+# the line the node logs at startup; leave it unset only for a node started with
+# EXO_API_AUTH_DISABLED=true.
+AUTH=()
+if [ -n "${EXO_API_KEY:-}" ]; then
+  AUTH=(-H "Authorization: Bearer $EXO_API_KEY")
+fi
+
 echo "=== Test: trust_remote_code attack via API ==="
 echo "Target: $HOST"
 echo ""
@@ -23,7 +31,7 @@ rm -f /tmp/exo-rce-proof.txt
 # Step 0: Clean up any stale card from previous runs
 if [ -f "$CARD_FILE" ]; then
   echo "[0] Removing stale card from previous run ..."
-  curl -s -X DELETE \
+  curl ${AUTH[@]+"${AUTH[@]}"} -s -X DELETE \
     "http://$HOST/models/custom/$(python3 -c 'import urllib.parse; print(urllib.parse.quote("'"$MODEL_ID"'", safe=""))')" >/dev/null
   rm -f "$CARD_FILE"
   echo "    Done"
@@ -32,7 +40,7 @@ fi
 
 # Step 1: Add the malicious model via API
 echo "[1] Adding model via POST /models/add ..."
-ADD_RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "http://$HOST/models/add" \
+ADD_RESPONSE=$(curl ${AUTH[@]+"${AUTH[@]}"} -s -w "\n%{http_code}" -X POST "http://$HOST/models/add" \
   -H "Content-Type: application/json" \
   -d "{\"model_id\":\"$MODEL_ID\"}")
 HTTP_CODE=$(echo "$ADD_RESPONSE" | tail -1)
@@ -66,7 +74,7 @@ cat "$CARD_FILE"
 # Step 3: Place the instance
 echo ""
 echo "[3] Attempting POST /place_instance ..."
-PLACE_RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "http://$HOST/place_instance" \
+PLACE_RESPONSE=$(curl ${AUTH[@]+"${AUTH[@]}"} -s -w "\n%{http_code}" -X POST "http://$HOST/place_instance" \
   -H "Content-Type: application/json" \
   -d "{\"model_id\":\"$MODEL_ID\"}")
 PLACE_CODE=$(echo "$PLACE_RESPONSE" | tail -1)
@@ -82,7 +90,7 @@ fi
 # Step 3b: Wait for placement to materialize before inference.
 echo ""
 echo "[3b] Waiting for placed instance ..."
-if ! AWAIT_RESPONSE=$(curl -fsS --max-time 65 \
+if ! AWAIT_RESPONSE=$(curl ${AUTH[@]+"${AUTH[@]}"} -fsS --max-time 65 \
   "http://$HOST/instance/await?model_id=$ENCODED_MODEL_ID&timeout_seconds=60" |
   awk '/^data: / { sub(/^data: /, ""); print; exit }'); then
   echo "    Timed out waiting for an instance for $MODEL_ID"
@@ -98,7 +106,7 @@ echo "    Instance ready"
 # Step 3c: Send a chat completion to actually trigger tokenizer loading
 echo ""
 echo "[3c] Sending chat completion to trigger tokenizer load ..."
-CHAT_RESPONSE=$(curl -s -w "\n%{http_code}" --max-time 30 -X POST "http://$HOST/v1/chat/completions" \
+CHAT_RESPONSE=$(curl ${AUTH[@]+"${AUTH[@]}"} -s -w "\n%{http_code}" --max-time 30 -X POST "http://$HOST/v1/chat/completions" \
   -H "Content-Type: application/json" \
   -d "{\"model\":\"$MODEL_ID\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"max_tokens\":1}")
 CHAT_CODE=$(echo "$CHAT_RESPONSE" | tail -1)
@@ -121,7 +129,7 @@ echo ""
 echo "[4] Cleaning up ..."
 
 # Find and delete any instance for this model
-INSTANCE_ID=$(curl -s "http://$HOST/state" | python3 -c "
+INSTANCE_ID=$(curl ${AUTH[@]+"${AUTH[@]}"} -s "http://$HOST/state" | python3 -c "
 import sys, json
 state = json.load(sys.stdin)
 for iid, wrapper in state.get('instances', {}).items():
@@ -134,14 +142,14 @@ for iid, wrapper in state.get('instances', {}).items():
 
 if [ -n "$INSTANCE_ID" ]; then
   echo "    Deleting instance $INSTANCE_ID ..."
-  curl -s -X DELETE "http://$HOST/instance/$INSTANCE_ID" >/dev/null
+  curl ${AUTH[@]+"${AUTH[@]}"} -s -X DELETE "http://$HOST/instance/$INSTANCE_ID" >/dev/null
   echo "    Done"
 else
   echo "    No instance found to delete"
 fi
 
 echo "    Deleting custom model card ..."
-curl -s -X DELETE \
+curl ${AUTH[@]+"${AUTH[@]}"} -s -X DELETE \
   "http://$HOST/models/custom/$(python3 -c 'import urllib.parse; print(urllib.parse.quote("'"$MODEL_ID"'", safe=""))')" >/dev/null
 echo "    Done"
 

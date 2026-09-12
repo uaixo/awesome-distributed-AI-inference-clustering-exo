@@ -71,7 +71,7 @@ final class ClusterStateService: ObservableObject {
     private func fetchLocalNodeId() async {
         do {
             let url = baseURL.appendingPathComponent("node_id")
-            var request = URLRequest(url: url)
+            var request = URLRequest.exoNode(url: url)
             request.cachePolicy = .reloadIgnoringLocalCacheData
             let (data, response) = try await session.data(for: request)
             guard let httpResponse = response as? HTTPURLResponse,
@@ -93,13 +93,18 @@ final class ClusterStateService: ObservableObject {
             await fetchLocalNodeId()
         }
         do {
-            var request = URLRequest(url: endpoint)
+            var request = URLRequest.exoNode(url: endpoint)
             request.cachePolicy = .reloadIgnoringLocalCacheData
             let (data, response) = try await session.data(for: request)
             guard let httpResponse = response as? HTTPURLResponse else {
                 throw URLError(.badServerResponse)
             }
             guard (200..<300).contains(httpResponse.statusCode) else {
+                if httpResponse.statusCode == 401 {
+                    // The node may have restarted under a different key; this
+                    // poll runs at 2 Hz, so the next one picks up the new one.
+                    ExoAPIKey.invalidate()
+                }
                 throw URLError(.badServerResponse)
             }
             let snapshot = try decoder.decode(ClusterState.self, from: data)
@@ -115,7 +120,7 @@ final class ClusterStateService: ObservableObject {
 
     func deleteInstance(_ id: String) async {
         do {
-            var request = URLRequest(url: baseURL.appendingPathComponent("instance/\(id)"))
+            var request = URLRequest.exoNode(url: baseURL.appendingPathComponent("instance/\(id)"))
             request.httpMethod = "DELETE"
             request.setValue("application/json", forHTTPHeaderField: "Accept")
             let (_, response) = try await session.data(for: request)
@@ -136,7 +141,7 @@ final class ClusterStateService: ObservableObject {
         async
     {
         do {
-            var request = URLRequest(url: baseURL.appendingPathComponent("instance"))
+            var request = URLRequest.exoNode(url: baseURL.appendingPathComponent("instance"))
             request.httpMethod = "POST"
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             let payload: [String: Any] = [
@@ -163,7 +168,7 @@ final class ClusterStateService: ObservableObject {
     func fetchModels() async {
         do {
             let url = baseURL.appendingPathComponent("models")
-            let (data, response) = try await session.data(from: url)
+            let (data, response) = try await session.data(for: URLRequest.exoNode(url: url))
             guard let httpResponse = response as? HTTPURLResponse,
                 (200..<300).contains(httpResponse.statusCode)
             else {

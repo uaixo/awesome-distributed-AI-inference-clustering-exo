@@ -4,6 +4,8 @@
   import HeaderNav from "$lib/components/HeaderNav.svelte";
   import IntegrationCard from "$lib/components/IntegrationCard.svelte";
   import { instances, refreshState } from "$lib/stores/app.svelte";
+  import { apiFetch } from "$lib/api";
+  import { apiKeyStore } from "$lib/stores/apiKey.svelte";
   import { onMount } from "svelte";
 
   const apiUrl = browser
@@ -11,6 +13,10 @@
     : "http://127.0.0.1:52415";
 
   const instancesData = $derived(instances());
+
+  // The node validates this now, so every snippet carries its real key. The
+  // placeholder is only reached on a node started with EXO_API_AUTH_DISABLED.
+  const clientKey = $derived(apiKeyStore.key ?? "x");
 
   let modelCapabilities = $state<Record<string, string[]>>({});
   let modelContextLengths = $state<Record<string, number>>({});
@@ -100,7 +106,7 @@
   const claudeShellCommand = $derived(
     [
       `ANTHROPIC_BASE_URL=${apiUrl} \\`,
-      `ANTHROPIC_API_KEY=x \\`,
+      `ANTHROPIC_API_KEY=${clientKey} \\`,
       `ANTHROPIC_DEFAULT_OPUS_MODEL=${opusModel} \\`,
       `ANTHROPIC_DEFAULT_SONNET_MODEL=${sonnetModel} \\`,
       `ANTHROPIC_DEFAULT_HAIKU_MODEL=${haikuModel} \\`,
@@ -115,7 +121,7 @@
       {
         env: {
           ANTHROPIC_BASE_URL: apiUrl,
-          ANTHROPIC_API_KEY: "x",
+          ANTHROPIC_API_KEY: clientKey,
           ANTHROPIC_DEFAULT_OPUS_MODEL: opusModel,
           ANTHROPIC_DEFAULT_SONNET_MODEL: sonnetModel,
           ANTHROPIC_DEFAULT_HAIKU_MODEL: haikuModel,
@@ -178,7 +184,7 @@
             name: "exo",
             options: {
               baseURL: `${apiUrl}/v1`,
-              apiKey: "x",
+              apiKey: clientKey,
             },
             models,
           },
@@ -190,7 +196,9 @@
     );
   });
 
-  const codexShellCommand = $derived(`EXO_API_KEY=x npx @openai/codex`);
+  const codexShellCommand = $derived(
+    `EXO_API_KEY=${clientKey} npx @openai/codex`,
+  );
 
   const codexConfig = $derived(
     [
@@ -216,7 +224,7 @@
           providers: {
             exo: {
               baseUrl: `${apiUrl}/v1`,
-              apiKey: "x",
+              apiKey: clientKey,
               api: "openai-completions",
               models: [
                 {
@@ -272,7 +280,7 @@
           exo: {
             baseUrl: `${apiUrl}/v1`,
             api: "openai-completions",
-            apiKey: "exo",
+            apiKey: clientKey,
             compat: {
               supportsDeveloperRole: false,
               // exo's OpenAI surface takes a boolean `enable_thinking` toggle,
@@ -371,7 +379,7 @@
   onMount(async () => {
     refreshState();
     try {
-      const resp = await fetch("/v1/models");
+      const resp = await apiFetch("/v1/models");
       const data = (await resp.json()) as {
         data: {
           id: string;

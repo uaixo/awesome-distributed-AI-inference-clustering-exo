@@ -9,6 +9,7 @@
   import { getNodesWithModelDownloaded } from "$lib/utils/downloads";
   import { getRecentEntries } from "$lib/stores/recents.svelte";
   import { addToast } from "$lib/stores/toast.svelte";
+  import { apiFetch } from "$lib/api";
 
   interface ModelInfo {
     id: string;
@@ -253,7 +254,7 @@
     mainSearchHfLoading = true;
     mainSearchDebounceTimer = setTimeout(async () => {
       try {
-        const response = await fetch(
+        const response = await apiFetch(
           `/models/search?query=${encodeURIComponent(query)}&limit=10`,
         );
         if (response.ok) {
@@ -275,7 +276,7 @@
   async function fetchTrendingModels() {
     hfIsLoadingTrending = true;
     try {
-      const response = await fetch("/models/search?query=&limit=20");
+      const response = await apiFetch("/models/search?query=&limit=20");
       if (response.ok) {
         hfTrendingModels = await response.json();
       }
@@ -294,7 +295,7 @@
 
     hfIsSearching = true;
     try {
-      const response = await fetch(
+      const response = await apiFetch(
         `/models/search?query=${encodeURIComponent(query)}&limit=20`,
       );
       if (response.ok) {

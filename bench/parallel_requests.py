@@ -7,6 +7,7 @@ import time
 import tty
 
 import aiohttp
+from exo_tools.client import api_key_headers, resolve_api_key
 
 NUM_REQUESTS = 10
 BASE_URL = ""
@@ -38,7 +39,10 @@ def fetch_models() -> list[str]:
     import json
     import urllib.request
 
-    with urllib.request.urlopen(f"{BASE_URL}/state") as resp:
+    request = urllib.request.Request(
+        f"{BASE_URL}/state", headers=api_key_headers(resolve_api_key())
+    )
+    with urllib.request.urlopen(request) as resp:
         data = json.loads(resp.read())
     model_ids: set[str] = set()
     for instance in data.get("instances", {}).values():
@@ -197,7 +201,9 @@ async def run_requests(print_stdout: bool = False) -> None:
     render_progress(first=True)
     lock = asyncio.Lock()
     try:
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(
+            headers=api_key_headers(resolve_api_key())
+        ) as session:
             tasks = [send_request(session, i, lock) for i in range(NUM_REQUESTS)]
             await asyncio.gather(*tasks)
         total = time.monotonic() - start_time

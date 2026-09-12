@@ -7,6 +7,7 @@
     type TraceListItem,
   } from "$lib/stores/app.svelte";
   import HeaderNav from "$lib/components/HeaderNav.svelte";
+  import { apiFetch } from "$lib/api";
 
   let traces = $state<TraceListItem[]>([]);
   let loading = $state(true);
@@ -74,7 +75,7 @@
   }
 
   async function downloadTrace(taskId: string) {
-    const response = await fetch(getTraceRawUrl(taskId));
+    const response = await apiFetch(getTraceRawUrl(taskId));
     const blob = await response.blob();
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -86,7 +87,7 @@
 
   async function openInPerfetto(taskId: string) {
     // Fetch trace data from our local API
-    const response = await fetch(getTraceRawUrl(taskId));
+    const response = await apiFetch(getTraceRawUrl(taskId));
     const traceData = await response.arrayBuffer();
 
     // Open Perfetto UI

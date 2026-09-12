@@ -258,7 +258,7 @@ struct BugReportService {
     }
 
     private func fetch(url: URL) async throws -> Data? {
-        var request = URLRequest(url: url)
+        var request = URLRequest.exoNode(url: url)
         request.timeoutInterval = 5
         do {
             let (data, response) = try await URLSession.shared.data(for: request)

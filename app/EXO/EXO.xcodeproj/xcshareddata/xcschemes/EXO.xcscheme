@@ -74,18 +74,6 @@
             ReferencedContainer = "container:EXO.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
-      <EnvironmentVariables>
-         <EnvironmentVariable
-            key = "EXO_BUG_AWS_ACCESS_KEY_ID"
-            value = "AKIAYEKP5EMXTOBYDGHX"
-            isEnabled = "YES">
-         </EnvironmentVariable>
-         <EnvironmentVariable
-            key = "EXO_BUG_AWS_SECRET_ACCESS_KEY"
-            value = "Ep5gIlUZ1o8ssTLQwmyy34yPGfTPEYQ4evE8NdPE"
-            isEnabled = "YES">
-         </EnvironmentVariable>
-      </EnvironmentVariables>
    </LaunchAction>
    <ProfileAction
       buildConfiguration = "Release"
