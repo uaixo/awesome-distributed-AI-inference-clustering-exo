@@ -322,6 +322,7 @@ exo supports several environment variables for configuration:
 | `EXO_LIBP2P_NAMESPACE` | Custom namespace for cluster isolation | None |
 | `EXO_FAST_SYNCH` | Control MLX_METAL_FAST_SYNCH behavior (for JACCL backend) | Auto |
 | `EXO_TRACING_ENABLED` | Enable distributed tracing for performance analysis | `false` |
+| `EXO_API_ALLOWED_ORIGINS` | Comma-separated browser origins allowed to call the API cross-origin. The dashboard is served from the same origin as the API, so it needs none. `*` is refused. | None |
 
 **Example usage:**
 

@@ -128,6 +128,7 @@ from exo.master.placement import place_instance as get_instance_placements
 from exo.shared.apply import apply
 from exo.shared.constants import (
     ENABLE_DISAGGREGATION,
+    EXO_API_ALLOWED_ORIGINS,
     EXO_CACHE_HOME,
     EXO_EVENT_LOG_DIR,
     EXO_IMAGE_CACHE_DIR,
@@ -235,6 +236,34 @@ def _require_disaggregation_enabled() -> None:
         )
 
 
+# Content types a browser <form> can send with no CORS preflight. The Ollama
+# handlers deliberately accept JSON whatever the content type, because real
+# clients vary; refusing exactly these three removes the path that let a page the
+# user visited POST to the API without the browser asking permission first.
+FORM_CONTENT_TYPES = frozenset(
+    {
+        "application/x-www-form-urlencoded",
+        "multipart/form-data",
+        "text/plain",
+    }
+)
+
+
+async def read_non_form_body(request: Request) -> bytes:
+    """Return the raw request body, refusing the content types a browser form can send.
+
+    Raises:
+        HTTPException: 415, when the content type is one a cross-origin form could use.
+    """
+    media_type = request.headers.get("content-type", "").split(";")[0].strip().lower()
+    if media_type in FORM_CONTENT_TYPES:
+        raise HTTPException(
+            status_code=415,
+            detail=f"unsupported content type {media_type!r}: send JSON",
+        )
+    return await request.body()
+
+
 class API:
     def __init__(
         self,
@@ -332,10 +361,20 @@ class API:
         return JSONResponse(err.model_dump(), status_code=exc.status_code)
 
     def _setup_cors(self) -> None:
+        """Allow cross-origin calls only from the origins the operator listed.
+
+        The dashboard is served from `/` on this same origin, so it needs no CORS
+        header at all and the default is to add no middleware. Credentials stay
+        off: authorization travels in a header, and echoing an arbitrary origin
+        with `Access-Control-Allow-Credentials` is what let any page a user
+        visited read the event log.
+        """
+        if not EXO_API_ALLOWED_ORIGINS:
+            return
         self.app.add_middleware(
             CORSMiddleware,
-            allow_origins=["*"],
-            allow_credentials=True,
+            allow_origins=list(EXO_API_ALLOWED_ORIGINS),
+            allow_credentials=False,
             allow_methods=["*"],
             allow_headers=["*"],
         )
@@ -1612,7 +1651,7 @@ class API:
         self, request: Request
     ) -> OllamaChatResponse | StreamingResponse:
         """Ollama Chat API — accepts JSON regardless of Content-Type."""
-        body = await request.body()
+        body = await read_non_form_body(request)
         payload = OllamaChatRequest.model_validate_json(body)
         task_params = ollama_request_to_text_generation(payload)
         validated_model = await self._validate_model_has_instance(
@@ -1648,7 +1687,7 @@ class API:
         self, request: Request
     ) -> OllamaGenerateResponse | StreamingResponse:
         """Ollama Generate API — accepts JSON regardless of Content-Type."""
-        body = await request.body()
+        body = await read_non_form_body(request)
         payload = OllamaGenerateRequest.model_validate_json(body)
         task_params = ollama_generate_request_to_text_generation(payload)
         validated_model = await self._validate_model_has_instance(
@@ -1715,7 +1754,7 @@ class API:
 
     async def ollama_show(self, request: Request) -> OllamaShowResponse:
         """Returns model information in Ollama show format."""
-        body = await request.body()
+        body = await read_non_form_body(request)
         payload = OllamaShowRequest.model_validate_json(body)
         model_name = payload.name or payload.model
         if not model_name:
