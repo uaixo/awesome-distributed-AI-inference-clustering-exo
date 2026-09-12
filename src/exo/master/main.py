@@ -379,9 +379,9 @@ class Master:
                                 self.state.node_backends,
                                 download_status=self.state.downloads,
                                 node_rdma_ctl=self.state.node_rdma_ctl,
-                                cycles_by_length=search_placement_cycles(
+                                cycle_search=search_placement_cycles(
                                     self.state.topology
-                                ).by_length,
+                                ),
                             )
                             transition_events = get_transition_events(
                                 self.state.instances, placement, self.state.tasks

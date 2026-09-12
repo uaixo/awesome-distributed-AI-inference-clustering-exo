@@ -12,8 +12,8 @@ from exo.master.placement_utils import (
     get_shard_assignments,
 )
 from exo.shared.constants import (
-    EXO_PLACEMENT_FULL_SEARCH_MAX_NODES,
     EXO_PLACEMENT_MAX_CYCLE_NODES,
+    EXO_PLACEMENT_MAX_CYCLES,
 )
 from exo.shared.models.model_cards import ModelId
 from exo.shared.topology import Topology
@@ -138,6 +138,22 @@ class CycleSearch:
         ]
 
 
+@final
+class PlacementSearchTruncatedError(ValueError):
+    """No ring could be placed on, and rings above ``max_cycle_nodes`` were not searched.
+
+    Distinct from the plain ValueError placement raises so that a caller can tell "this
+    cluster cannot run the model" from "the rings that could have run it were too
+    expensive to enumerate". Only ``search_placement_cycles`` can produce a search this
+    applies to.
+    """
+
+    def __init__(self, message: str, max_cycle_nodes: int) -> None:
+        """Record the largest ring size that was searched alongside the message."""
+        super().__init__(message)
+        self.max_cycle_nodes = max_cycle_nodes
+
+
 def group_cycles_by_length(cycles: Iterable[Cycle]) -> CyclesByLength:
     """Group cycles by node count, keeping the order they arrived in within each group."""
     grouped: dict[int, list[Cycle]] = {}
@@ -148,30 +164,36 @@ def group_cycles_by_length(cycles: Iterable[Cycle]) -> CyclesByLength:
 
 def search_placement_cycles(
     topology: Topology,
-    full_search_max_nodes: int = EXO_PLACEMENT_FULL_SEARCH_MAX_NODES,
+    max_cycles: int = EXO_PLACEMENT_MAX_CYCLES,
     max_cycle_nodes: int = EXO_PLACEMENT_MAX_CYCLE_NODES,
 ) -> CycleSearch:
     """Find the rings ``place_instance`` may choose from, within a cost it can afford.
 
     Enumerating every simple cycle is factorial in the node count: a fully meshed nine
     node cluster has 125,673 of them and an eleven node one eleven million, which takes
-    about a minute. At or below ``full_search_max_nodes`` nodes every cycle is enumerated,
-    which is what placement has always done, so it chooses exactly what it always chose.
-    Past that the search is limited to rings of ``max_cycle_nodes`` nodes: cheap, but
-    placement can then no longer choose a longer ring, and the cycles come back in a
-    different order and anchored at a different node, which moves shard ranks and ring
-    wiring. ``CycleSearch.max_cycle_nodes`` reports the limit that was applied, so a
-    caller can say a ring size was not searched rather than that nothing fits.
+    about a minute. A topology holding no more than ``max_cycles`` is still enumerated in
+    full, which is what placement has always done, so it chooses exactly what it always
+    chose. Only past that budget is the search limited to rings of ``max_cycle_nodes``
+    nodes: cheap, but placement can then no longer choose a longer ring, and the cycles
+    come back in a different order and anchored at a different node, which moves shard
+    ranks and ring wiring. ``CycleSearch.max_cycle_nodes`` reports the limit that was
+    applied, so a caller can say a ring size was not searched rather than that nothing
+    fits.
+
+    The budget counts cycles rather than nodes because node count does not predict the
+    cost: forty Macs in a Thunderbolt loop hold forty cycles and are enumerated exactly,
+    while eleven in a mesh hold eleven million. Establishing that a topology is over
+    budget costs about 25ms whatever its size, since the cycles are drained from a lazy
+    iterator and the walk is abandoned once the budget is passed.
 
     Call this once per request and pass the result to every ``place_instance`` call that
     request makes: the enumeration does not depend on the command, so repeating it per
     candidate multiplies the cost by the number of candidates.
     """
-    node_count = len(list(topology.list_nodes()))
-    if node_count <= full_search_max_nodes:
+    every_cycle = topology.get_cycles_within_budget(max_cycles)
+    if every_cycle is not None:
         return CycleSearch(
-            by_length=group_cycles_by_length(topology.get_cycles()),
-            max_cycle_nodes=None,
+            by_length=group_cycles_by_length(every_cycle), max_cycle_nodes=None
         )
     return CycleSearch(
         by_length=group_cycles_by_length(topology.get_cycles_up_to(max_cycle_nodes)),
@@ -218,9 +240,25 @@ def _reject_sharding_the_model_cannot_do(command: PlaceInstance) -> None:
         )
 
 
+def _no_placement_reason(command: PlaceInstance, checked_model: bool) -> str:
+    """Why no cycle could be placed on, in the order a reader would check the causes."""
+    if not checked_model:
+        return "No cycles found with sufficient memory"
+    if command.sharding == Sharding.Tensor:
+        kv_heads = command.model_card.num_key_value_heads
+        return (
+            f"No tensor sharding found for model with "
+            f"hidden_size={command.model_card.hidden_size}"
+            f"{f', num_key_value_heads={kv_heads}' if kv_heads is not None else ''}"
+            f" across candidate cycles"
+        )
+    return "Pipeline parallelism is not supported for Gemma 4; use tensor parallelism instead."
+
+
 def _smallest_placeable_cycles(
     command: PlaceInstance,
-    cycles_by_length: CyclesByLength,
+    cycle_search: CycleSearch,
+    node_count: int,
     node_memory: Mapping[NodeId, MemoryUsage],
     required_nodes: set[NodeId] | None,
 ) -> list[Cycle]:
@@ -235,8 +273,12 @@ def _smallest_placeable_cycles(
 
     Raises ValueError naming the first obstacle, in the order a reader would check them:
     nothing with enough memory, then a sharding the model cannot do, then no cycle whose
-    node count that sharding can use.
+    node count that sharding can use. Raises ``PlacementSearchTruncatedError`` instead when the
+    search was bounded and the cluster has more nodes than the bound, since then a ring
+    that was never enumerated might have been placeable and no other message may claim
+    the cluster cannot hold the model.
     """
+    cycles_by_length = cycle_search.by_length
     lengths = sorted(
         length for length in cycles_by_length if length >= command.min_nodes
     )
@@ -261,19 +303,16 @@ def _smallest_placeable_cycles(
         if allowed:
             return allowed
 
-    if not checked_model:
-        raise ValueError("No cycles found with sufficient memory")
-    if command.sharding == Sharding.Tensor:
-        kv_heads = command.model_card.num_key_value_heads
-        raise ValueError(
-            f"No tensor sharding found for model with "
-            f"hidden_size={command.model_card.hidden_size}"
-            f"{f', num_key_value_heads={kv_heads}' if kv_heads is not None else ''}"
-            f" across candidate cycles"
+    max_cycle_nodes = cycle_search.max_cycle_nodes
+    if max_cycle_nodes is not None and node_count > max_cycle_nodes:
+        raise PlacementSearchTruncatedError(
+            f"Rings of more than {max_cycle_nodes} nodes were not searched on this "
+            f"{node_count} node cluster, because enumerating them costs more than the "
+            f"placement budget allows. Within the rings that were searched: "
+            f"{_no_placement_reason(command, checked_model)}",
+            max_cycle_nodes=max_cycle_nodes,
         )
-    raise ValueError(
-        "Pipeline parallelism is not supported for Gemma 4; use tensor parallelism instead."
-    )
+    raise ValueError(_no_placement_reason(command, checked_model))
 
 
 def place_instance(
@@ -287,18 +326,24 @@ def place_instance(
     download_status: Mapping[NodeId, Sequence[DownloadProgress]] | None = None,
     node_rdma_ctl: Mapping[NodeId, NodeRdmaCtlStatus] | None = None,
     *,
-    cycles_by_length: CyclesByLength,
+    cycle_search: CycleSearch,
 ) -> dict[InstanceId, Instance]:
     """Build the instance this command places, or raise ValueError explaining why not.
 
-    ``cycles_by_length`` must be the cycles of ``topology``, grouped by node count —
-    ``search_placement_cycles`` produces exactly that. It is a parameter rather than
-    something this function enumerates because enumerating is the expensive part and does
-    not depend on ``command``, so a caller trying several commands against one topology
-    enumerates once and this walks only the group it places on.
+    ``cycle_search`` must be the rings of ``topology`` — ``search_placement_cycles``
+    produces exactly that. It is a parameter rather than something this function
+    enumerates because enumerating is the expensive part and does not depend on
+    ``command``, so a caller trying several commands against one topology enumerates once
+    and this walks only the group it places on. It carries the ring size the search
+    stopped at as well as the rings, so a failure can say a ring size was not searched
+    rather than that nothing fits.
     """
     smallest_cycles = _smallest_placeable_cycles(
-        command, cycles_by_length, node_memory, required_nodes
+        command,
+        cycle_search,
+        len(list(topology.list_nodes())),
+        node_memory,
+        required_nodes,
     )
 
     required_backends = set(INSTANCE_META_BACKENDS[command.instance_meta]) & set(

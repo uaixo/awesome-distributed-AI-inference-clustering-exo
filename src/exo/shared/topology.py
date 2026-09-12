@@ -209,6 +209,37 @@ class Topology:
             cycles.append(Cycle(node_ids=[node_id]))
         return cycles
 
+    def get_cycles_within_budget(self, max_cycles: int) -> list[Cycle] | None:
+        """Get what ``get_cycles`` returns, or None if the graph holds more than ``max_cycles``.
+
+        The budget counts the simple cycles the graph holds, which is the factorial part.
+        The singleton cycle each node gets is always kept: there is one per node, and they
+        are the only candidates for placing on a single node.
+
+        ``rx.simple_cycles`` is a lazy iterator, so this abandons the walk as soon as the
+        budget is passed instead of paying for the whole enumeration: on a fully meshed
+        graph it answers None in about 25ms at any node count. A graph within budget
+        returns the same cycles in the same order as ``get_cycles``, so a caller that
+        takes this path places exactly what it always placed.
+
+        The cycles collected before the budget was passed are discarded rather than
+        returned, since a caller that filters by cycle length would otherwise see a
+        length group holding only some of its cycles and silently choose from a subset.
+
+        Raises ValueError for a budget below 1, which no graph can satisfy.
+        """
+        if max_cycles < 1:
+            raise ValueError(f"max_cycles must be at least 1, got {max_cycles}")
+
+        cycles: list[Cycle] = []
+        for cycle_idx in rx.simple_cycles(self._graph):
+            if len(cycles) == max_cycles:
+                return None
+            cycles.append(Cycle(node_ids=[self._graph[idx] for idx in cycle_idx]))
+        for node_id in self.list_nodes():
+            cycles.append(Cycle(node_ids=[node_id]))
+        return cycles
+
     def get_cycles_up_to(self, max_nodes: int) -> list[Cycle]:
         """Get the simple cycles of at most ``max_nodes`` nodes, plus singleton cycles.
 

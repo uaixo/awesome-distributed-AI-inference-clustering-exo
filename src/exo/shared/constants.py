@@ -123,18 +123,25 @@ ENABLE_DISAGGREGATION = os.getenv("ENABLE_DISAGGREGATION", "false").lower() == "
 EXO_MAX_CONCURRENT_REQUESTS = int(os.getenv("EXO_MAX_CONCURRENT_REQUESTS", "8"))
 
 # Placement enumerates every simple cycle in the topology to find the rings a model can
-# be sharded across, which is factorial in the node count on a fully meshed LAN. Measured
-# cost of one GET /instance/previews on a mesh, which asks placement 4N questions: five
-# nodes 0.013s, seven 0.19s, eight 1.3s, nine 12.9s. At or below this many nodes every
-# cycle is still enumerated, so placement chooses exactly what it has always chosen.
-EXO_PLACEMENT_FULL_SEARCH_MAX_NODES = int(
-    os.getenv("EXO_PLACEMENT_FULL_SEARCH_MAX_NODES", "8")
-)
-# The largest ring offered once the topology is past that threshold. Rings of more than
-# this many nodes are then not enumerated, so placement cannot choose one, and the
-# placement endpoints report the limit rather than reporting that no ring fits. Four keeps
-# previews under two seconds out to twenty nodes; five is about four times the work at
-# eleven nodes and twenty times at fourteen. Must be at least 2.
+# be sharded across, which is factorial in the node count on a fully meshed LAN. A
+# topology holding no more than this many cycles is enumerated in full, so placement
+# chooses exactly what it has always chosen; a larger one falls back to the bounded
+# search below. This is a budget on cycles rather than on nodes because node count does
+# not predict cost: a fully meshed eight-node cluster holds 16,064 cycles and a nine-node
+# one 125,664, while forty Macs in a Thunderbolt loop hold 40. Measured cost of one
+# GET /instance/previews, which asks placement 4N questions: 16,064 cycles is 1.3s, and
+# establishing that a mesh is over budget costs 25ms at any node count. Must be at
+# least 1.
+EXO_PLACEMENT_MAX_CYCLES = int(os.getenv("EXO_PLACEMENT_MAX_CYCLES", "20000"))
+if EXO_PLACEMENT_MAX_CYCLES < 1:
+    raise ValueError(
+        f"EXO_PLACEMENT_MAX_CYCLES must be at least 1, got {EXO_PLACEMENT_MAX_CYCLES}"
+    )
+# The largest ring offered on a topology over that budget. Rings of more than this many
+# nodes are then not enumerated, so placement cannot choose one, and the placement
+# endpoints report that the ring size was not searched rather than reporting that no ring
+# fits. Four keeps previews under two seconds out to twenty nodes; five is about four
+# times the work at eleven nodes and twenty times at fourteen. Must be at least 2.
 EXO_PLACEMENT_MAX_CYCLE_NODES = int(os.getenv("EXO_PLACEMENT_MAX_CYCLE_NODES", "4"))
 if EXO_PLACEMENT_MAX_CYCLE_NODES < 2:
     raise ValueError(

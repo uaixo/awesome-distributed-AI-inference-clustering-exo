@@ -240,12 +240,18 @@ That candidate set is factorial in the node count: a fully meshed nine-node clus
 125,673 simple cycles and an eleven-node one eleven million, which takes about a minute to
 enumerate. So the search is enumerated once per request and shared across every candidate
 placement in it, and placement walks only the shortest group of equal-length cycles that can
-hold the model rather than filtering all of them. Past `EXO_PLACEMENT_FULL_SEARCH_MAX_NODES`
-nodes the enumeration is limited to rings of `EXO_PLACEMENT_MAX_CYCLE_NODES` nodes, and
-`/instance/previews` reports that limit as `max_cycle_nodes` so a ring size that is missing
-because it was not searched is distinguishable from one that does not fit. Both placement
-endpoints run this in a thread, because the node has one event loop and the router, election,
-worker planner and every open stream share it.
+hold the model rather than filtering all of them. A topology holding more than
+`EXO_PLACEMENT_MAX_CYCLES` cycles is not enumerated in full: the enumeration is limited to
+rings of `EXO_PLACEMENT_MAX_CYCLE_NODES` nodes instead, and `/instance/previews` reports that
+limit as `max_cycle_nodes` so a ring size that is missing because it was not searched is
+distinguishable from one that does not fit. Placement reports the same distinction as a
+`PlacementSearchTruncatedError`. The budget counts cycles rather than nodes because node count
+does not predict the cost — forty Macs in a Thunderbolt loop hold forty cycles and are still
+searched exactly, while eleven in a mesh hold eleven million — and because a lazy enumeration
+establishes that a topology is over budget in about 25ms whatever its size. Both placement
+endpoints run this in a thread, and share one capacity limiter so a burst of requests cannot
+turn the whole thread pool into concurrent enumerations on a node that is also running
+inference.
 
 Two things the objective function does *not* contain are worth knowing: link bandwidth is never
 measured (a "fast link" is inferred from the interface name — Thunderbolt beats Ethernet beats

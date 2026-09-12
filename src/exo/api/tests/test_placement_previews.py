@@ -62,14 +62,14 @@ def test_the_topology_is_enumerated_once_for_the_whole_response(
 ):
     state, node_ids = _state(4)
     calls = 0
-    enumerate_cycles = Topology.get_cycles
+    enumerate_cycles = Topology.get_cycles_within_budget
 
-    def counting_get_cycles(topology: Topology):
+    def counting_get_cycles(topology: Topology, max_cycles: int):
         nonlocal calls
         calls += 1
-        return enumerate_cycles(topology)
+        return enumerate_cycles(topology, max_cycles)
 
-    monkeypatch.setattr(Topology, "get_cycles", counting_get_cycles)
+    monkeypatch.setattr(Topology, "get_cycles_within_budget", counting_get_cycles)
 
     build_placement_previews(model_card, state)
 
@@ -140,3 +140,18 @@ def test_a_cluster_too_large_to_enumerate_still_answers_within_a_budget(
     assert placed_sizes
     assert max(placed_sizes) <= EXO_PLACEMENT_MAX_CYCLE_NODES
     assert len(node_ids) == BOUNDED_CLUSTER_NODES
+
+
+def test_a_not_searched_ring_size_is_reported_alongside_one_that_does_not_fit(
+    model_card: ModelCard,
+):
+    state, _ = _state(BOUNDED_CLUSTER_NODES)
+
+    response = build_placement_previews(model_card, state)
+
+    errors = [preview.error for preview in response.previews if preview.error]
+    assert any("were not searched" in error for error in errors), errors
+    # Both failures reach the response. Recording every failure under one key would have
+    # let whichever the loop reached first stand for both, so a ring size nobody searched
+    # would read as one that cannot hold the model.
+    assert any("were not searched" not in error for error in errors), errors

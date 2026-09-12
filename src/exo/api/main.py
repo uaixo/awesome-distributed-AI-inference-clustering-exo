@@ -220,6 +220,17 @@ _API_EVENT_LOG_DIR = EXO_EVENT_LOG_DIR / "api"
 ONBOARDING_COMPLETE_FILE = EXO_CACHE_HOME / "onboarding_complete"
 
 
+_PLACEMENT_SEARCH_LIMITER = anyio.CapacityLimiter(1)
+"""Serialises the placement searches that run in a thread.
+
+Enumerating a topology's cycles is CPU-bound, and anyio's default thread pool allows
+forty at once, so without this a burst of previews requests turns into forty cores of
+enumeration on a node that is also running inference: the event loop stays responsive
+while the machine does not. One at a time is what the node did when this ran on the loop,
+minus the blocking.
+"""
+
+
 def _format_to_content_type(image_format: Literal["png", "jpeg", "webp"] | None) -> str:
     return f"image/{image_format or 'png'}"
 
@@ -572,13 +583,15 @@ class API:
                 current_instances=state.instances,
                 download_status=state.downloads,
                 node_rdma_ctl=state.node_rdma_ctl,
-                cycles_by_length=search_placement_cycles(state.topology).by_length,
+                cycle_search=search_placement_cycles(state.topology),
             )
 
         try:
             # Enumerating the topology's cycles is O(factorial) in the node count, so it
             # goes in a thread rather than stalling every other task on this loop.
-            placements = await to_thread.run_sync(_place)
+            placements = await to_thread.run_sync(
+                _place, limiter=_PLACEMENT_SEARCH_LIMITER
+            )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -620,7 +633,8 @@ class API:
         # node mesh this is seconds of work, and it would otherwise stall the router,
         # election, the worker planner and every open SSE stream for all of it.
         return await to_thread.run_sync(
-            partial(build_placement_previews, model_card, state, required_nodes)
+            partial(build_placement_previews, model_card, state, required_nodes),
+            limiter=_PLACEMENT_SEARCH_LIMITER,
         )
 
     def get_instance(self, instance_id: InstanceId) -> Instance:

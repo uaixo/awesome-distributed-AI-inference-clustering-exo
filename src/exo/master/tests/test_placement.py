@@ -173,7 +173,7 @@ def test_get_instance_placements_create_instance(
         node_memory,
         node_network,
         _metal_only(node_memory),
-        cycles_by_length=search_placement_cycles(topology).by_length,
+        cycle_search=search_placement_cycles(topology),
     )
 
     # assert
@@ -224,7 +224,7 @@ def test_get_instance_placements_one_node_exact_fit() -> None:
         node_memory,
         node_network,
         _metal_only(node_memory),
-        cycles_by_length=search_placement_cycles(topology).by_length,
+        cycle_search=search_placement_cycles(topology),
     )
 
     assert len(placements) == 1
@@ -260,7 +260,7 @@ def test_get_instance_placements_one_node_fits_with_extra_memory() -> None:
         node_memory,
         node_network,
         _metal_only(node_memory),
-        cycles_by_length=search_placement_cycles(topology).by_length,
+        cycle_search=search_placement_cycles(topology),
     )
 
     assert len(placements) == 1
@@ -298,7 +298,7 @@ def test_get_instance_placements_one_node_not_fit() -> None:
             node_memory,
             node_network,
             _metal_only(node_memory),
-            cycles_by_length=search_placement_cycles(topology).by_length,
+            cycle_search=search_placement_cycles(topology),
         )
 
 
@@ -405,7 +405,7 @@ def test_placement_selects_leaf_nodes(
         node_memory,
         node_network,
         _metal_only(node_memory),
-        cycles_by_length=search_placement_cycles(topology).by_length,
+        cycle_search=search_placement_cycles(topology),
     )
 
     # assert
@@ -512,7 +512,7 @@ def test_tensor_rdma_backend_connectivity_matrix(
         node_network,
         _metal_only(node_memory),
         node_rdma_ctl=node_rdma_ctl,
-        cycles_by_length=search_placement_cycles(topology).by_length,
+        cycle_search=search_placement_cycles(topology),
     )
 
     # assert
@@ -641,7 +641,7 @@ def test_place_mlx_jaccl_rejects_when_a_node_has_rdma_ctl_disabled(
             node_network,
             _metal_only(node_memory),
             node_rdma_ctl=node_rdma_ctl,
-            cycles_by_length=search_placement_cycles(topology).by_length,
+            cycle_search=search_placement_cycles(topology),
         )
 
 
@@ -680,7 +680,7 @@ def test_place_mlx_jaccl_rejects_when_node_rdma_ctl_missing(model_card: ModelCar
             node_network,
             _metal_only(node_memory),
             node_rdma_ctl=node_rdma_ctl,
-            cycles_by_length=search_placement_cycles(topology).by_length,
+            cycle_search=search_placement_cycles(topology),
         )
 
 
@@ -855,7 +855,7 @@ def test_placement_prefers_cycle_with_downloaded_model(
         node_network,
         _metal_only(node_memory),
         download_status=download_status,
-        cycles_by_length=search_placement_cycles(topology).by_length,
+        cycle_search=search_placement_cycles(topology),
     )
 
     assert len(placements) == 1
@@ -934,7 +934,7 @@ def test_placement_prefers_cycle_with_higher_download_progress(
         node_network,
         _metal_only(node_memory),
         download_status=download_status,
-        cycles_by_length=search_placement_cycles(topology).by_length,
+        cycle_search=search_placement_cycles(topology),
     )
 
     assert len(placements) == 1
@@ -989,7 +989,7 @@ def test_placement_does_not_prefer_cycle_with_failed_download(
         node_network,
         _metal_only(node_memory),
         download_status=download_status,
-        cycles_by_length=search_placement_cycles(topology).by_length,
+        cycle_search=search_placement_cycles(topology),
     )
 
     assert len(placements) == 1
@@ -1020,7 +1020,7 @@ def test_placement_rejects_when_model_backends_disjoint_from_engine(
             node_memory,
             node_network,
             _metal_only(node_memory),
-            cycles_by_length=search_placement_cycles(topology).by_length,
+            cycle_search=search_placement_cycles(topology),
         )
 
 
@@ -1071,7 +1071,7 @@ def test_placement_rejects_when_only_some_nodes_support_backend(
             node_memory,
             node_network,
             node_backends,
-            cycles_by_length=search_placement_cycles(topology).by_length,
+            cycle_search=search_placement_cycles(topology),
         )
 
 
@@ -1106,5 +1106,5 @@ def test_mlx_jaccl_rejects_cuda_only_cycle(model_card: ModelCard):
             node_network,
             node_backends,
             node_rdma_ctl=node_rdma_ctl,
-            cycles_by_length=search_placement_cycles(topology).by_length,
+            cycle_search=search_placement_cycles(topology),
         )

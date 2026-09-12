@@ -11,13 +11,14 @@ from collections.abc import Sequence
 
 from exo.api.types.api import PlacementPreview, PlacementPreviewResponse
 from exo.master.placement import (
-    CyclesByLength,
+    CycleSearch,
+    PlacementSearchTruncatedError,
     place_instance,
     search_placement_cycles,
 )
 from exo.shared.constants import (
-    EXO_PLACEMENT_FULL_SEARCH_MAX_NODES,
     EXO_PLACEMENT_MAX_CYCLE_NODES,
+    EXO_PLACEMENT_MAX_CYCLES,
 )
 from exo.shared.models.model_cards import ModelCard
 from exo.shared.types.commands import PlaceInstance
@@ -38,12 +39,20 @@ PREVIEW_INSTANCE_METAS: tuple[InstanceMeta, ...] = (
 _NO_PLACEMENT = 0
 """The node count a failed preview is recorded under, so each failure is reported once."""
 
+_NOT_SEARCHED = -1
+"""The node count a preview whose ring sizes were never enumerated is recorded under.
+
+Separate from ``_NO_PLACEMENT`` so that "no ring of any searched size fits" and "the rings
+that might have fitted were not searched" are both reported, instead of whichever the
+loop reached first standing for both.
+"""
+
 
 def build_placement_previews(
     model_card: ModelCard,
     state: State,
     required_nodes: set[NodeId] | None = None,
-    full_search_max_nodes: int = EXO_PLACEMENT_FULL_SEARCH_MAX_NODES,
+    max_cycles: int = EXO_PLACEMENT_MAX_CYCLES,
     max_cycle_nodes: int = EXO_PLACEMENT_MAX_CYCLE_NODES,
 ) -> PlacementPreviewResponse:
     """Place ``model_card`` every way the cluster allows and report each distinct result.
@@ -61,9 +70,7 @@ def build_placement_previews(
     if not node_ids:
         return PlacementPreviewResponse(previews=[])
 
-    cycle_search = search_placement_cycles(
-        state.topology, full_search_max_nodes, max_cycle_nodes
-    )
+    cycle_search = search_placement_cycles(state.topology, max_cycles, max_cycle_nodes)
     current_instance_ids = set(state.instances.keys())
 
     seen: set[tuple[Sharding, InstanceMeta, int]] = set()
@@ -72,21 +79,24 @@ def build_placement_previews(
     for sharding in PREVIEW_SHARDINGS:
         for instance_meta in PREVIEW_INSTANCE_METAS:
             for min_nodes in range(1, len(node_ids) + 1):
-                preview = _preview(
+                preview, not_searched = _preview(
                     model_card,
                     state,
-                    cycle_search.by_length,
+                    cycle_search,
                     current_instance_ids,
                     required_nodes,
                     sharding,
                     instance_meta,
                     min_nodes,
                 )
-                placed_nodes = (
-                    _NO_PLACEMENT
-                    if preview.instance is None
-                    else len(preview.instance.shard_assignments.node_to_runner)
-                )
+                if preview.instance is not None:
+                    placed_nodes = len(
+                        preview.instance.shard_assignments.node_to_runner
+                    )
+                elif not_searched:
+                    placed_nodes = _NOT_SEARCHED
+                else:
+                    placed_nodes = _NO_PLACEMENT
                 if (sharding, instance_meta, placed_nodes) not in seen:
                     previews.append(preview)
                 seen.add((sharding, instance_meta, placed_nodes))
@@ -99,14 +109,18 @@ def build_placement_previews(
 def _preview(
     model_card: ModelCard,
     state: State,
-    cycles_by_length: CyclesByLength,
+    cycle_search: CycleSearch,
     current_instance_ids: set[InstanceId],
     required_nodes: set[NodeId] | None,
     sharding: Sharding,
     instance_meta: InstanceMeta,
     min_nodes: int,
-) -> PlacementPreview:
-    """Place one candidate, reporting the reason as the preview's error if it cannot be."""
+) -> tuple[PlacementPreview, bool]:
+    """Place one candidate, reporting the reason as the preview's error if it cannot be.
+
+    The flag says whether the failure was that the rings were never enumerated, which the
+    caller keeps distinct from a ring size that was searched and did not fit.
+    """
     try:
         placements = place_instance(
             PlaceInstance(
@@ -123,15 +137,18 @@ def _preview(
             required_nodes=required_nodes,
             download_status=state.downloads,
             node_rdma_ctl=state.node_rdma_ctl,
-            cycles_by_length=cycles_by_length,
+            cycle_search=cycle_search,
         )
     except ValueError as exc:
-        return PlacementPreview(
-            model_id=model_card.model_id,
-            sharding=sharding,
-            instance_meta=instance_meta,
-            instance=None,
-            error=str(exc),
+        return (
+            PlacementPreview(
+                model_id=model_card.model_id,
+                sharding=sharding,
+                instance_meta=instance_meta,
+                instance=None,
+                error=str(exc),
+            ),
+            isinstance(exc, PlacementSearchTruncatedError),
         )
 
     new_instances = [
@@ -140,24 +157,30 @@ def _preview(
         if instance_id not in current_instance_ids
     ]
     if len(new_instances) != 1:
-        return PlacementPreview(
-            model_id=model_card.model_id,
-            sharding=sharding,
-            instance_meta=instance_meta,
-            instance=None,
-            error="Expected exactly one new instance from placement",
+        return (
+            PlacementPreview(
+                model_id=model_card.model_id,
+                sharding=sharding,
+                instance_meta=instance_meta,
+                instance=None,
+                error="Expected exactly one new instance from placement",
+            ),
+            False,
         )
 
     instance = new_instances[0]
     placement_node_ids = list(instance.shard_assignments.node_to_runner.keys())
-    return PlacementPreview(
-        model_id=model_card.model_id,
-        sharding=sharding,
-        instance_meta=instance_meta,
-        instance=instance,
-        memory_delta_by_node=_memory_delta_by_node(model_card, placement_node_ids)
-        or None,
-        error=None,
+    return (
+        PlacementPreview(
+            model_id=model_card.model_id,
+            sharding=sharding,
+            instance_meta=instance_meta,
+            instance=instance,
+            memory_delta_by_node=_memory_delta_by_node(model_card, placement_node_ids)
+            or None,
+            error=None,
+        ),
+        False,
     )
 
 

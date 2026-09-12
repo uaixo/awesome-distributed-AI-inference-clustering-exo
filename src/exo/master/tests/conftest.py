@@ -60,3 +60,27 @@ def create_mesh_topology(node_count: int) -> tuple[Topology, list[NodeId]]:
                     )
                 )
     return topology, node_ids
+
+
+def create_ring_topology(node_count: int) -> tuple[Topology, list[NodeId]]:
+    """A topology where each node reaches only its two neighbours, closing one loop.
+
+    This is what Macs daisy-chained over Thunderbolt look like to placement: many nodes
+    but few cycles, since the only rings are the whole loop in each direction plus the
+    node pairs. A ring of any size is cheap to enumerate exactly.
+    """
+    topology = Topology()
+    node_ids = [NodeId(f"node-{index:02d}") for index in range(node_count)]
+    for node_id in node_ids:
+        topology.add_node(node_id)
+    for index, source in enumerate(node_ids):
+        sink = node_ids[(index + 1) % node_count]
+        for start, end in ((source, sink), (sink, source)):
+            topology.add_connection(
+                Connection(
+                    source=start,
+                    sink=end,
+                    edge=create_socket_connection(index + 1),
+                )
+            )
+    return topology, node_ids
