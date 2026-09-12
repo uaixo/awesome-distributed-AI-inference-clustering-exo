@@ -1,0 +1,56 @@
+name: macos-app
+
+# The nix pipeline never opens app/EXO: Xcode is the only thing that compiles it,
+# so a Swift change reaches a release build unchecked. This job compiles the app
+# and the unit tests, then runs the unit tests.
+#
+# Signing is ad-hoc (identity "-"), which needs no certificate and no team while
+# still attaching EXO.entitlements. The UI tests are excluded: they drive the real
+# app, which has no business launching on a runner.
+
+on:
+  push:
+    paths:
+      - "app/**"
+      - ".github/workflows/macos-app.yml"
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    name: Build and test the macOS app
+    runs-on: macos-26
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: app/EXO
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          lfs: false
+
+      - name: Record the toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: Build the app and the tests
+        run: |
+          xcodebuild build-for-testing \
+            -scheme EXO \
+            -configuration Debug \
+            -destination 'platform=macOS' \
+            -derivedDataPath build \
+            CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_IDENTITY=- \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=YES
+
+      - name: Run the unit tests
+        run: |
+          xcodebuild test-without-building \
+            -scheme EXO \
+            -configuration Debug \
+            -destination 'platform=macOS' \
+            -derivedDataPath build \
+            -only-testing:EXOTests
