@@ -7,6 +7,12 @@ name: macos-app
 # Signing is ad-hoc (identity "-"), which needs no certificate and no team while
 # still attaching EXO.entitlements. The UI tests are excluded: they drive the real
 # app, which has no business launching on a runner.
+#
+# Two settings exist only to make the build possible without the release pipeline:
+# Copy Bundle Resources pulls in dist/exo, the PyInstaller runtime that build-app.yml
+# produces before it calls xcodebuild, so an empty directory stands in for it here;
+# and ENABLE_DEBUG_DYLIB=NO drops the SwiftUI preview dylib, whose link step failed
+# here and which nothing on a runner previews.
 
 on:
   push:
@@ -34,13 +40,17 @@ jobs:
           xcodebuild -version
           swift --version
 
+      - name: Stand in for the PyInstaller runtime
+        run: mkdir -p ../../dist/exo && touch ../../dist/exo/placeholder
+
       - name: Build the app and the tests
         run: |
           xcodebuild build-for-testing \
             -scheme EXO \
             -configuration Debug \
-            -destination 'platform=macOS' \
+            -destination 'platform=macOS,arch=arm64' \
             -derivedDataPath build \
+            ENABLE_DEBUG_DYLIB=NO \
             CODE_SIGN_STYLE=Manual \
             CODE_SIGN_IDENTITY=- \
             CODE_SIGNING_REQUIRED=NO \
@@ -51,6 +61,6 @@ jobs:
           xcodebuild test-without-building \
             -scheme EXO \
             -configuration Debug \
-            -destination 'platform=macOS' \
+            -destination 'platform=macOS,arch=arm64' \
             -derivedDataPath build \
             -only-testing:EXOTests
