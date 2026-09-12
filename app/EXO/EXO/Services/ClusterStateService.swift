@@ -120,8 +120,7 @@ final class ClusterStateService: ObservableObject {
 
     func deleteInstance(_ id: String) async {
         do {
-            var request = URLRequest.exoNode(
-                url: baseURL.appendingPathComponent("instance/\(id)"))
+            var request = URLRequest.exoNode(url: baseURL.appendingPathComponent("instance/\(id)"))
             request.httpMethod = "DELETE"
             request.setValue("application/json", forHTTPHeaderField: "Accept")
             let (_, response) = try await session.data(for: request)

@@ -11,8 +11,7 @@ import Foundation
 /// and the node then writes no file, so that value is read from the same place
 /// `ExoProcessController` reads it when building the child process environment.
 enum ExoAPIKey {
-    private static let fileURL =
-        URL(fileURLWithPath: NSHomeDirectory())
+    private static let fileURL = URL(fileURLWithPath: NSHomeDirectory())
         .appendingPathComponent(".exo")
         .appendingPathComponent("api_key")
 
@@ -47,8 +46,7 @@ enum ExoAPIKey {
     private static func configuredKey() -> String? {
         guard
             let data = UserDefaults.standard.data(forKey: "EXOCustomEnvironmentVariables"),
-            let variables = try? JSONDecoder().decode(
-                [CustomEnvironmentVariable].self, from: data)
+            let variables = try? JSONDecoder().decode([CustomEnvironmentVariable].self, from: data)
         else {
             return nil
         }
