@@ -16,6 +16,12 @@ import Foundation
 /// key while the node has one.
 enum ExoAPIKey {
     /// Where the node writes the key it generates on first run.
+    ///
+    /// The default path only. `EXO_HOME` moves the node's whole cache directory and
+    /// nothing here follows it, so setting it as a Settings row has the node write
+    /// `~/$EXO_HOME/api_key` while this still reads `~/.exo/api_key`; the app then sends
+    /// no key and every route answers 401. `EXO_API_KEY_FILE` in
+    /// src/exo/shared/constants.py is the node's side of this path.
     static let fileURL = URL(fileURLWithPath: NSHomeDirectory())
         .appendingPathComponent(".exo")
         .appendingPathComponent("api_key")

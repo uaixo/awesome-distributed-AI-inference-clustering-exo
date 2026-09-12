@@ -131,7 +131,9 @@ EXO_API_ALLOWED_ORIGINS: tuple[str, ...] = _parse_comma_values(
 )
 
 # The shared secret every API route requires, generated on first run. Kept beside
-# the other per-node cache state so it survives restarts.
+# the other per-node cache state so it survives restarts. The macOS app reads the
+# same file to talk to the node it launched: see ExoAPIKey.fileURL in
+# app/EXO/EXO/Services/ExoAPIKey.swift, which hardcodes the default path.
 EXO_API_KEY_FILE = EXO_CACHE_HOME / "api_key"
 # Serve the API with no authentication. Only for a network the operator already
 # trusts: the API binds every interface, so this opens every route to any host

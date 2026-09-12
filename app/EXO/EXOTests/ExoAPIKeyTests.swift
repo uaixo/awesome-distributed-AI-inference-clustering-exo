@@ -136,10 +136,24 @@ struct ExoAPIKeyTests {
 
     /// Proves the guard that keeps app launch out of this process is still live.
     ///
-    /// This test runs in exactly the environment `isRunningTests` describes, so a
-    /// variable Apple renames fails here instead of reopening the modal prompt.
+    /// This test runs in exactly the environment `isRunningTests` describes, so the
+    /// signals asserted here are the ones `EXOApp.init` read moments earlier.
     @Test func theHostAppKnowsItIsRunningTests() {
         #expect(isRunningTests)
+    }
+
+    /// Losing every signal hangs the run at the network-setup alert instead of failing a
+    /// test, so the signal that depends on no variable name is asserted on its own.
+    @Test func theHostAppSeesTheTestFrameworkWithoutReadingTheEnvironment() {
+        let signals = TestHostSignals.atLaunch
+        let environmentSignals = """
+            XCTestConfigurationFilePath=\(signals.configurationFilePath), \
+            XCTestBundlePath=\(signals.bundlePath)
+            """
+        #expect(
+            signals.xctestFrameworkLoaded,
+            "XCTest was not loaded when EXOApp.init read the signals. \(environmentSignals)"
+        )
     }
 }
 
