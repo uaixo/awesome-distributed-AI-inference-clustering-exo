@@ -1,13 +1,17 @@
 import contextlib
 import multiprocessing as mp
+import pickle
+import select
+import threading
 from dataclasses import dataclass, field
 from functools import wraps
 from inspect import iscoroutinefunction
 from math import inf
+from multiprocessing.reduction import ForkingPickler
 from multiprocessing.synchronize import Event
 from queue import Empty, Full
 from types import CoroutineType, TracebackType
-from typing import Any, Callable, NoReturn, Self, cast, overload, override
+from typing import Any, Callable, NoReturn, Protocol, Self, cast, overload, override
 
 from anyio import (
     BrokenResourceError,
@@ -219,8 +223,83 @@ class _MpEndOfStream:
     pass
 
 
+class _MpBuffer[T](Protocol):
+    """The part of multiprocessing.Queue that the Mp channels use"""
+
+    def put(self, obj: T, block: bool = True, timeout: float | None = None) -> None: ...
+    def put_nowait(self, obj: T) -> None: ...
+    def get(self, block: bool = True, timeout: float | None = None) -> T: ...
+    def close(self) -> None: ...
+    def join_thread(self) -> None: ...
+
+
+class _ImmediateQueue[T]:
+    """A multiprocessing queue whose put has written the item out of the process when it returns.
+
+    multiprocessing.Queue.put only hands the item to a feeder thread, which writes it out later
+    and needs the GIL to do so. Native code that holds the GIL while it blocks (MLX's distributed
+    init does, while it waits for the other ranks to connect) stops that thread, so what was put
+    just before such a call stays in the process until the call returns. This queue writes from
+    the thread that puts, so nothing can hold it back. In exchange put blocks while the pipe is
+    full: the other end must keep reading.
+    """
+
+    def __init__(self) -> None:
+        self._reader, self._writer = mp.Pipe(duplex=False)
+        self._read_lock = mp.Lock()
+        self._write_lock = mp.Lock()
+        self._closed = False
+
+    def put(self, obj: T, block: bool = True, timeout: float | None = None) -> None:
+        if self._closed:
+            raise ValueError("Queue is closed")
+        payload = ForkingPickler.dumps(obj)
+        if not self._write_lock.acquire(block, timeout):
+            raise Full
+        try:
+            # Without blocking, write only while the pipe has room, which is all a small
+            # item (such as the end-of-stream marker) needs. (poll, as select can't take
+            # descriptors numbered above 1023.)
+            if not block:
+                writable = select.poll()
+                writable.register(self._writer, select.POLLOUT)
+                if not writable.poll(0):
+                    raise Full
+            self._writer.send_bytes(payload)
+        finally:
+            self._write_lock.release()
+
+    def put_nowait(self, obj: T) -> None:
+        self.put(obj, block=False)
+
+    def get(self, block: bool = True, timeout: float | None = None) -> T:
+        if self._closed:
+            raise ValueError("Queue is closed")
+        if not self._read_lock.acquire(block, timeout):
+            raise Empty
+        try:
+            if (not block or timeout is not None) and not self._reader.poll(
+                timeout if block else 0
+            ):
+                raise Empty
+            payload = self._reader.recv_bytes()
+        finally:
+            self._read_lock.release()
+        return cast(T, pickle.loads(payload))
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._reader.close()
+        self._writer.close()
+
+    def join_thread(self) -> None:
+        """Nothing to wait for: every item put has been written already"""
+
+
 class MpState[T]:
-    def __init__(self, max_buffer_size: float):
+    def __init__(self, max_buffer_size: float, send_immediately: bool = False):
         if max_buffer_size == inf:
             max_buffer_size = 0
         assert isinstance(max_buffer_size, int), (
@@ -228,13 +307,44 @@ class MpState[T]:
         )
 
         self.max_buffer_size: float = max_buffer_size
-        self.buffer: mp.Queue[T | _MpEndOfStream] = mp.Queue(max_buffer_size)
+        self.buffer: _MpBuffer[T | _MpEndOfStream]
+        if send_immediately:
+            assert max_buffer_size == 0, "Channels that send immediately are unbounded"
+            self.buffer = _ImmediateQueue()
+        else:
+            self.buffer = mp.Queue(max_buffer_size)
         self.closed: Event = mp.Event()
+        self._buffer_close_lock = threading.Lock()
+        self._buffer_closed = False
+
+    def close_buffer(self) -> None:
+        """Close this process's end of the buffer, once.
+
+        Two threads can close a channel at the same time: a receiver's reader thread
+        closes it when it reads the end-of-stream marker, which the receiver's close
+        writes just before it closes the buffer itself. Closing a pipe twice closes its
+        descriptor twice, which fails (EBADF), or closes whatever file was given that
+        number in between. A thread that finds another closing the buffer waits for it,
+        so that the buffer is closed when either returns (joining asserts it is).
+        """
+        with self._buffer_close_lock:
+            if self._buffer_closed:
+                return
+            self._buffer_closed = True
+            self.buffer.close()
 
     def __getstate__(self):
         d = self.__dict__.copy()
         d.pop("__orig_class__", None)
+        # per process: a copy in another process closes its own end
+        d.pop("_buffer_close_lock", None)
+        d.pop("_buffer_closed", None)
         return d
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        self.__dict__.update(state)
+        self._buffer_close_lock = threading.Lock()
+        self._buffer_closed = False
 
 
 @dataclass(eq=False)
@@ -276,7 +386,7 @@ class MpSender[T]:
             self._state.closed.set()
         with contextlib.suppress(Exception):
             self._state.buffer.put_nowait(_MpEndOfStream())
-        self._state.buffer.close()
+        self._state.close_buffer()
 
     # == unique to Mp channels ==
     def join(self) -> None:
@@ -335,10 +445,10 @@ class MpReceiver[T]:
         except WouldBlock:
             try:
                 item = self._state.buffer.get()
-            except (TypeError, OSError):
-                # Queue pipe can get closed while we are blocked on get().
-                # The underlying connection._handle becomes None, causing
-                # TypeError in read(handle, remaining).
+            except (TypeError, OSError, ValueError):
+                # Queue pipe can get closed while we are blocked on get(), or just
+                # before: the underlying connection._handle becomes None, causing
+                # TypeError in read(handle, remaining), or the queue says it's closed.
                 raise ClosedResourceError from None
             if isinstance(item, _MpEndOfStream):
                 self.close()
@@ -355,7 +465,7 @@ class MpReceiver[T]:
             self._state.closed.set()
         with contextlib.suppress(Exception):
             self._state.buffer.put_nowait(_MpEndOfStream())
-        self._state.buffer.close()
+        self._state.close_buffer()
 
     # == unique to Mp channels ==
     def join(self) -> None:
@@ -443,7 +553,14 @@ class mp_channel[T]:  # noqa: N801
     """Create a pair of synchronous channels for interprocess communication"""
 
     # max buffer size uses math.inf to represent an unbounded queue, and 0 to represent a yet unimplemented "unbuffered" queue.
-    def __new__(cls, max_buffer_size: float = inf) -> tuple[MpSender[T], MpReceiver[T]]:
+    #
+    # With send_immediately, send writes the item out of the process before it returns, instead
+    # of leaving that to a background thread: use it for a sender that may then block in native
+    # code holding the GIL, which stops that thread. Such a send blocks while the pipe is full,
+    # so the receiver must keep reading.
+    def __new__(
+        cls, max_buffer_size: float = inf, *, send_immediately: bool = False
+    ) -> tuple[MpSender[T], MpReceiver[T]]:
         if (
             max_buffer_size == 0
             or max_buffer_size != inf
@@ -452,5 +569,5 @@ class mp_channel[T]:  # noqa: N801
             raise ValueError(
                 "max_buffer_size must be either an integer or math.inf. 0-sized buffers are not supported by multiprocessing"
             )
-        state = MpState[T](max_buffer_size)
+        state = MpState[T](max_buffer_size, send_immediately)
         return MpSender(_state=state), MpReceiver(_state=state)

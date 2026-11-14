@@ -6,15 +6,12 @@
 //
 
 import AppKit
-import CoreImage
-import CoreImage.CIFilterBuiltins
 import ServiceManagement
-import Sparkle
 import SwiftUI
-import UserNotifications
 import os.log
 
 struct EXOApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var controller: ExoProcessController
     @StateObject private var stateService: ClusterStateService
     @StateObject private var networkStatusService: NetworkStatusService
@@ -23,21 +20,22 @@ struct EXOApp: App {
     @StateObject private var thunderboltBridgeService: ThunderboltBridgeService
     @StateObject private var settingsWindowController: SettingsWindowController
     @StateObject private var bugReportWindowController: BugReportWindowController
-    private let terminationObserver: TerminationObserver
-    private let firstLaunchPopout = FirstLaunchPopout()
-    private let ciContext = CIContext(options: nil)
+    @StateObject private var menuBar: MenuBarController
 
     init() {
+        // As the unit tests' host app, start nothing: no welcome, no login
+        // item, no exo.
+        let isHostingTests = isRunningTests
+        // Decided first, before anything else writes this app's defaults.
+        let isFirstRun = !isHostingTests && StartupPreferences().welcomeIsDue()
+
         let controller = ExoProcessController()
         let updater = SparkleUpdater(processController: controller)
-        terminationObserver = TerminationObserver {
-            Task { @MainActor in
-                controller.cancelPendingLaunch()
-                controller.stop()
-            }
-        }
+        AppDelegate.stopExoBeforeQuitting = { await controller.stopAndWaitForExit() }
         _controller = StateObject(wrappedValue: controller)
         let service = ClusterStateService()
+        service.resetWhenExoStarts(controller.$status)
+        controller.modelsRunningOnThisMac = { [weak service] in service?.isRunningModelsOnThisMac }
         _stateService = StateObject(wrappedValue: service)
         let networkStatus = NetworkStatusService()
         _networkStatusService = StateObject(wrappedValue: networkStatus)
@@ -46,269 +44,122 @@ struct EXOApp: App {
         _updater = StateObject(wrappedValue: updater)
         let thunderboltBridge = ThunderboltBridgeService(clusterStateService: service)
         _thunderboltBridgeService = StateObject(wrappedValue: thunderboltBridge)
-        _settingsWindowController = StateObject(wrappedValue: SettingsWindowController())
-        _bugReportWindowController = StateObject(wrappedValue: BugReportWindowController())
-        guard !isRunningTests else {
+        let settingsWindow = SettingsWindowController()
+        _settingsWindowController = StateObject(wrappedValue: settingsWindow)
+        let bugReportWindow = BugReportWindowController()
+        _bugReportWindowController = StateObject(wrappedValue: bugReportWindow)
+        let menuBar = MenuBarController(
+            controller: controller, stateService: service, localNetworkChecker: localNetwork,
+            thunderboltBridgeService: thunderboltBridge, updater: updater,
+            bugReportWindowController: bugReportWindow,
+            startupDashboardOpener: StartupDashboardOpener(isFirstRun: isFirstRun))
+        _menuBar = StateObject(wrappedValue: menuBar)
+        SettingsOpener.openSettings = { settingsWindow.open() }
+        guard !isHostingTests else { return }
+
+        menuBar.install()
+        LaunchAtLoginHelper.registerIfChosen()
+        // Nothing asks for an administrator password at launch: Thunderbolt
+        // networking (NetworkSetupHelper) is offered when it matters.
+        service.startPolling()
+        networkStatus.startPolling()
+        // exo, and the Local Network check (which, like exo, makes macOS ask
+        // for Local Network access), start straight away, except on the first
+        // run, where the welcome window explains the prompt first.
+        let startExo = {
+            localNetwork.startPeriodicChecking(interval: isFirstRun ? 3 : 10)
+            controller.launchWhenPreviousExoHasExited()
+        }
+        guard isFirstRun else {
+            startExo()
+            AppDelegate.onReopen = { menuBar.handleReopen() }
             return
         }
-        startSession(
-            controller: controller,
-            stateService: service,
-            networkStatus: networkStatus,
-            localNetwork: localNetwork
-        )
+        let welcome = WelcomeWindowController(
+            controller: controller, localNetworkChecker: localNetwork, startExo: startExo)
+        AppDelegate.welcomeWindow = welcome
+        AppDelegate.launchAsRegularApp = true
+        AppDelegate.onFinishLaunching = { welcome.show() }
+        AppDelegate.onReopen = {
+            if welcome.isShowing {
+                welcome.bringToFront()
+            } else {
+                menuBar.handleReopen()
+            }
+        }
     }
 
-    /// Start the login item, the network-setup prompt, the node and the pollers.
-    ///
-    /// Skipped entirely in a test process, where none of them has anyone to answer
-    /// them and the prompt would block the run: see `isRunningTests`.
-    private func startSession(
-        controller: ExoProcessController,
-        stateService: ClusterStateService,
-        networkStatus: NetworkStatusService,
-        localNetwork: LocalNetworkChecker
-    ) {
-        enableLaunchAtLoginIfNeeded()
-        // Install LaunchDaemon to disable Thunderbolt Bridge on startup (prevents network loops)
-        NetworkSetupHelper.promptAndInstallIfNeeded()
-        // Check local network access periodically (warning disappears when user grants permission)
-        localNetwork.startPeriodicChecking(interval: 10)
-        controller.scheduleLaunch(after: 5)
-        stateService.startPolling()
-        networkStatus.startPolling()
-    }
-
+    /// The menu bar item is AppKit (`MenuBarController`); the one SwiftUI
+    /// scene is the Settings window.
     var body: some Scene {
-        MenuBarExtra {
-            ContentView()
+        Settings {
+            SettingsView()
                 .environmentObject(controller)
+                .environmentObject(updater)
                 .environmentObject(stateService)
                 .environmentObject(networkStatusService)
                 .environmentObject(localNetworkChecker)
-                .environmentObject(updater)
-                .environmentObject(thunderboltBridgeService)
-                .environmentObject(settingsWindowController)
-                .environmentObject(bugReportWindowController)
-        } label: {
-            menuBarIcon
-                .onReceive(controller.$isFirstLaunchReady) { ready in
-                    if ready {
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
-                            self.firstLaunchPopout.onComplete = { [weak controller] in
-                                controller?.markOnboardingCompleted()
-                            }
-                            self.firstLaunchPopout.show()
-                        }
-                    }
-                }
-        }
-        .menuBarExtraStyle(.window)
-    }
-
-    private var menuBarIcon: some View {
-        let baseImage = resizedMenuBarIcon(named: "menubar-icon", size: 26)
-        let iconImage: NSImage
-        if controller.status == .stopped, let grey = greyscale(image: baseImage) {
-            iconImage = grey
-        } else {
-            iconImage = baseImage ?? NSImage(named: "menubar-icon") ?? NSImage()
-        }
-        return Image(nsImage: iconImage)
-            .accessibilityLabel("EXO")
-    }
-
-    private func resizedMenuBarIcon(named: String, size: CGFloat) -> NSImage? {
-        guard let original = NSImage(named: named) else {
-            print("Failed to load image named: \(named)")
-            return nil
-        }
-        let targetSize = NSSize(width: size, height: size)
-        let resized = NSImage(size: targetSize)
-        resized.lockFocus()
-        defer { resized.unlockFocus() }
-        NSGraphicsContext.current?.imageInterpolation = .high
-        original.draw(
-            in: NSRect(origin: .zero, size: targetSize),
-            from: NSRect(origin: .zero, size: original.size),
-            operation: .copy,
-            fraction: 1.0
-        )
-        return resized
-    }
-
-    private func greyscale(image: NSImage?) -> NSImage? {
-        guard
-            let image,
-            let tiff = image.tiffRepresentation,
-            let bitmap = NSBitmapImageRep(data: tiff),
-            let cgImage = bitmap.cgImage
-        else {
-            return nil
-        }
-
-        let ciImage = CIImage(cgImage: cgImage)
-        let filter = CIFilter.colorControls()
-        filter.inputImage = ciImage
-        filter.saturation = 0
-        filter.brightness = -0.2
-        filter.contrast = 0.9
-
-        guard let output = filter.outputImage,
-            let rendered = ciContext.createCGImage(output, from: output.extent)
-        else {
-            return nil
-        }
-
-        return NSImage(cgImage: rendered, size: image.size)
-    }
-
-    private func enableLaunchAtLoginIfNeeded() {
-        guard SMAppService.mainApp.status != .enabled else { return }
-        do {
-            try SMAppService.mainApp.register()
-        } catch {
-            Logger().error(
-                "Failed to register EXO for launch at login: \(error.localizedDescription)")
         }
     }
-
 }
 
 /// Helper for managing EXO's launch-at-login registration
 enum LaunchAtLoginHelper {
     private static let logger = Logger(subsystem: "io.exo.EXO", category: "LaunchAtLogin")
 
-    /// Unregisters EXO from launching at login
-    static func disable() {
-        guard SMAppService.mainApp.status == .enabled else { return }
-        do {
+    static var status: SMAppService.Status {
+        SMAppService.mainApp.status
+    }
+
+    /// Registers or unregisters EXO as a login item, throwing macOS's error if
+    /// it refuses.
+    static func setEnabled(_ enabled: Bool) throws {
+        let status = SMAppService.mainApp.status
+        if enabled {
+            guard status != .enabled else { return }
+            try SMAppService.mainApp.register()
+            logger.info("Registered EXO for launch at login")
+        } else {
+            guard status == .enabled || status == .requiresApproval else { return }
             try SMAppService.mainApp.unregister()
             logger.info("Unregistered EXO from launch at login")
+        }
+    }
+
+    /// Registers EXO to launch at login. Returns whether it is registered.
+    @discardableResult
+    static func enable() -> Bool {
+        do {
+            try setEnabled(true)
+            return true
+        } catch {
+            logger.error(
+                "Failed to register EXO for launch at login: \(error.localizedDescription, privacy: .public)"
+            )
+            return false
+        }
+    }
+
+    /// Unregisters EXO from launching at login
+    static func disable() {
+        do {
+            try setEnabled(false)
         } catch {
             logger.error(
                 "Failed to unregister EXO from launch at login: \(error.localizedDescription, privacy: .public)"
             )
         }
     }
-}
 
-final class SparkleUpdater: NSObject, ObservableObject {
-    private let controller: SPUStandardUpdaterController
-    private let delegateProxy: ExoUpdaterDelegate
-    private let notificationDelegate = ExoNotificationDelegate()
-    private var periodicCheckTask: Task<Void, Never>?
-
-    init(processController: ExoProcessController) {
-        let proxy = ExoUpdaterDelegate(processController: processController)
-        delegateProxy = proxy
-        controller = SPUStandardUpdaterController(
-            startingUpdater: !isRunningTests,
-            updaterDelegate: proxy,
-            userDriverDelegate: nil
-        )
-        super.init()
-        // A test process has no registered bundle for the notification centre and
-        // nobody to answer an update prompt: see `isRunningTests`.
-        guard !isRunningTests else {
-            return
-        }
-        let center = UNUserNotificationCenter.current()
-        center.delegate = notificationDelegate
-        center.requestAuthorization(options: [.alert, .sound]) { _, _ in }
-        controller.updater.automaticallyChecksForUpdates = true
-        controller.updater.automaticallyDownloadsUpdates = false
-        controller.updater.updateCheckInterval = 900  // 15 minutes
-        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak controller] in
-            controller?.updater.checkForUpdatesInBackground()
-        }
-        let updater = controller.updater
-        let intervalSeconds = max(60.0, controller.updater.updateCheckInterval)
-        let intervalNanos = UInt64(intervalSeconds * 1_000_000_000)
-        periodicCheckTask = Task {
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: intervalNanos)
-                await MainActor.run {
-                    updater.checkForUpdatesInBackground()
-                }
-            }
-        }
-    }
-
-    deinit {
-        periodicCheckTask?.cancel()
-    }
-
-    @MainActor
-    func checkForUpdates() {
-        controller.checkForUpdates(nil)
-    }
-}
-
-private final class ExoUpdaterDelegate: NSObject, SPUUpdaterDelegate {
-    private weak var processController: ExoProcessController?
-
-    init(processController: ExoProcessController) {
-        self.processController = processController
-    }
-
-    nonisolated func updater(_ updater: SPUUpdater, didFindValidUpdate item: SUAppcastItem) {
-        showNotification(
-            title: "Update available",
-            body: "EXO \(item.displayVersionString) is ready to install."
-        )
-    }
-
-    nonisolated func updaterWillRelaunchApplication(_ updater: SPUUpdater) {
-        Task { @MainActor in
-            guard let controller = self.processController else { return }
-            controller.cancelPendingLaunch()
-            controller.stop()
-        }
-    }
-
-    nonisolated private func showNotification(title: String, body: String) {
-        let center = UNUserNotificationCenter.current()
-        let content = UNMutableNotificationContent()
-        content.title = title
-        content.body = body
-        let request = UNNotificationRequest(
-            identifier: "exo-update-\(UUID().uuidString)",
-            content: content,
-            trigger: nil
-        )
-        center.add(request, withCompletionHandler: nil)
-    }
-}
-
-private final class ExoNotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
-    func userNotificationCenter(
-        _ center: UNUserNotificationCenter,
-        willPresent notification: UNNotification,
-        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) ->
-            Void
-    ) {
-        completionHandler([.banner, .list, .sound])
-    }
-}
-
-@MainActor
-private final class TerminationObserver {
-    private var token: NSObjectProtocol?
-
-    init(onTerminate: @escaping () -> Void) {
-        token = NotificationCenter.default.addObserver(
-            forName: NSApplication.willTerminateNotification,
-            object: nil,
-            queue: .main
-        ) { _ in
-            onTerminate()
-        }
-    }
-
-    deinit {
-        if let token {
-            NotificationCenter.default.removeObserver(token)
+    /// Registers EXO as a login item if the user ticked "Open EXO at login"
+    /// in the welcome window and it isn't registered yet. Waits for a launch
+    /// from a stable location if the app runs translocated.
+    static func registerIfChosen(preferences: StartupPreferences = StartupPreferences()) {
+        let isTranslocated = StartupPreferences.isTranslocated(bundlePath: Bundle.main.bundlePath)
+        guard preferences.shouldRegisterLaunchAtLoginOnStartup(isTranslocated: isTranslocated)
+        else { return }
+        if enable() {
+            preferences.markLaunchAtLoginDefaultApplied()
         }
     }
 }

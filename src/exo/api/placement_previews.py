@@ -7,22 +7,22 @@ enumerates once and reuses it, and it is a plain synchronous function so a calle
 run the whole batch in a thread instead of blocking the node's only event loop.
 """
 
-from collections.abc import Sequence
-
 from exo.api.types.api import PlacementPreview, PlacementPreviewResponse
 from exo.master.placement import (
     CycleSearch,
     PlacementSearchTruncatedError,
     place_instance,
     search_placement_cycles,
+    shard_bytes,
 )
 from exo.shared.constants import (
     EXO_PLACEMENT_MAX_CYCLE_NODES,
     EXO_PLACEMENT_MAX_CYCLES,
 )
 from exo.shared.models.model_cards import ModelCard
-from exo.shared.types.commands import PlaceInstance
+from exo.shared.topology import Topology
 from exo.shared.types.common import NodeId
+from exo.shared.types.placement import PlacementRequest
 from exo.shared.types.state import State
 from exo.shared.types.worker.instances import InstanceId, InstanceMeta
 from exo.shared.types.worker.shards import Sharding
@@ -54,6 +54,8 @@ def build_placement_previews(
     required_nodes: set[NodeId] | None = None,
     max_cycles: int = EXO_PLACEMENT_MAX_CYCLES,
     max_cycle_nodes: int = EXO_PLACEMENT_MAX_CYCLE_NODES,
+    *,
+    topology: Topology | None = None,
 ) -> PlacementPreviewResponse:
     """Place ``model_card`` every way the cluster allows and report each distinct result.
 
@@ -65,12 +67,18 @@ def build_placement_previews(
     computed against it: a caller running this in a thread reads ``self.state`` once
     before the call rather than once per preview. The limits are parameters so a test can
     reach the bounded search without building a topology large enough to need it.
+
+    ``topology`` is what to place on when that is not all of ``state.topology``: the API
+    passes the state's topology without the nodes it cannot reach now, since a model
+    could not load there.
     """
-    node_ids = list(state.topology.list_nodes())
+    if topology is None:
+        topology = state.topology
+    node_ids = list(topology.list_nodes())
     if not node_ids:
         return PlacementPreviewResponse(previews=[])
 
-    cycle_search = search_placement_cycles(state.topology, max_cycles, max_cycle_nodes)
+    cycle_search = search_placement_cycles(topology, max_cycles, max_cycle_nodes)
     current_instance_ids = set(state.instances.keys())
 
     seen: set[tuple[Sharding, InstanceMeta, int]] = set()
@@ -82,6 +90,7 @@ def build_placement_previews(
                 preview, not_searched = _preview(
                     model_card,
                     state,
+                    topology,
                     cycle_search,
                     current_instance_ids,
                     required_nodes,
@@ -109,6 +118,7 @@ def build_placement_previews(
 def _preview(
     model_card: ModelCard,
     state: State,
+    topology: Topology,
     cycle_search: CycleSearch,
     current_instance_ids: set[InstanceId],
     required_nodes: set[NodeId] | None,
@@ -123,13 +133,13 @@ def _preview(
     """
     try:
         placements = place_instance(
-            PlaceInstance(
+            PlacementRequest(
                 model_card=model_card,
                 sharding=sharding,
                 instance_meta=instance_meta,
                 min_nodes=min_nodes,
             ),
-            state.topology,
+            topology,
             state.instances,
             state.node_memory,
             state.node_network,
@@ -137,6 +147,8 @@ def _preview(
             required_nodes=required_nodes,
             download_status=state.downloads,
             node_rdma_ctl=state.node_rdma_ctl,
+            runners=state.runners,
+            node_identities=state.node_identities,
             cycle_search=cycle_search,
         )
     except ValueError as exc:
@@ -169,36 +181,21 @@ def _preview(
         )
 
     instance = new_instances[0]
-    placement_node_ids = list(instance.shard_assignments.node_to_runner.keys())
+    shard_assignments = instance.shard_assignments
+    # Each node's share: pipeline gives a node layers in proportion to its memory. Keys
+    # are ``NodeId`` strings because the field crosses the HTTP boundary.
+    memory_delta_by_node = {
+        str(node_id): shard_bytes(shard_assignments.runner_to_shard[runner_id])
+        for node_id, runner_id in shard_assignments.node_to_runner.items()
+    }
     return (
         PlacementPreview(
             model_id=model_card.model_id,
             sharding=sharding,
             instance_meta=instance_meta,
             instance=instance,
-            memory_delta_by_node=_memory_delta_by_node(model_card, placement_node_ids)
-            or None,
+            memory_delta_by_node=memory_delta_by_node or None,
             error=None,
         ),
         False,
     )
-
-
-def _memory_delta_by_node(
-    model_card: ModelCard, placement_node_ids: Sequence[NodeId]
-) -> dict[str, int]:
-    """Split the model's bytes across the placed nodes, giving the remainder to the first.
-
-    Keys are ``NodeId`` strings because the field crosses the HTTP boundary. "First" is
-    by string order of the node ids, not by position in the ring, so the split does not
-    move when the same nodes are ordered differently.
-    """
-    if not placement_node_ids:
-        return {}
-    total_bytes = model_card.storage_size.in_bytes
-    per_node = total_bytes // len(placement_node_ids)
-    remainder = total_bytes % len(placement_node_ids)
-    return {
-        str(node_id): per_node + (1 if index < remainder else 0)
-        for index, node_id in enumerate(sorted(placement_node_ids, key=str))
-    }

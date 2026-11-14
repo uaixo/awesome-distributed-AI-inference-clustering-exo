@@ -9,6 +9,11 @@
 
 type ToastType = "success" | "error" | "warning" | "info";
 
+export interface ToastAction {
+  label: string;
+  onClick: () => void;
+}
+
 export interface Toast {
   id: string;
   type: ToastType;
@@ -16,6 +21,8 @@ export interface Toast {
   /** Auto-dismiss after this many ms. 0 = persistent (must be dismissed manually). */
   duration: number;
   createdAt: number;
+  action?: ToastAction;
+  onDismiss?: () => void;
 }
 
 interface ToastInput {
@@ -25,6 +32,10 @@ interface ToastInput {
   persistent?: boolean;
   /** Auto-dismiss duration in ms. Default: 4000 for success/info, 6000 for error/warning. */
   duration?: number;
+  /** Optional button shown in the toast; clicking it also dismisses the toast. */
+  action?: ToastAction;
+  /** Called once when the toast goes, however it is dismissed. */
+  onDismiss?: () => void;
 }
 
 const DEFAULT_DURATIONS: Record<ToastType, number> = {
@@ -53,6 +64,8 @@ export function addToast(input: ToastInput): string {
     message: input.message,
     duration,
     createdAt: Date.now(),
+    action: input.action,
+    onDismiss: input.onDismiss,
   };
 
   toastList = [...toastList, toast];
@@ -71,7 +84,9 @@ export function dismissToast(id: string): void {
     clearTimeout(timer);
     timers.delete(id);
   }
+  const toast = toastList.find((t) => t.id === id);
   toastList = toastList.filter((t) => t.id !== id);
+  toast?.onDismiss?.();
 }
 
 /** Dismiss all toasts matching a message (useful for dedup). */

@@ -82,3 +82,27 @@ class TensorShardMetadata(BaseShardMetadata):
 ShardMetadata: TypeAlias = (
     PipelineShardMetadata | CfgShardMetadata | TensorShardMetadata
 )
+
+
+def is_primary_output_shard(shard: ShardMetadata) -> bool:
+    """Whether an image model's runner with this shard emits the images: the last pipeline
+    stage (of CFG group 0, the positive prompt, for CFG models)."""
+    if isinstance(shard, CfgShardMetadata):
+        return (
+            shard.pipeline_rank == shard.pipeline_world_size - 1 and shard.cfg_rank == 0
+        )
+    if isinstance(shard, PipelineShardMetadata):
+        return shard.device_rank == shard.world_size - 1
+    return False
+
+
+def whole_model_shard(card: ModelCard) -> PipelineShardMetadata:
+    """All of a model, as one device downloads it."""
+    return PipelineShardMetadata(
+        model_card=card,
+        device_rank=0,
+        world_size=1,
+        start_layer=0,
+        end_layer=card.n_layers,
+        n_layers=card.n_layers,
+    )

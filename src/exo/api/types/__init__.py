@@ -23,6 +23,10 @@ from .api import DeleteDownloadResponse as DeleteDownloadResponse
 from .api import DeleteInstanceResponse as DeleteInstanceResponse
 from .api import DeleteTracesRequest as DeleteTracesRequest
 from .api import DeleteTracesResponse as DeleteTracesResponse
+from .api import DeploymentConstraints as DeploymentConstraints
+from .api import (
+    DevicesOnOtherVersionsResponse as DevicesOnOtherVersionsResponse,
+)
 from .api import ErrorInfo as ErrorInfo
 from .api import ErrorResponse as ErrorResponse
 from .api import FinishReason as FinishReason
@@ -48,6 +52,7 @@ from .api import PlacementPreview as PlacementPreview
 from .api import PlacementPreviewResponse as PlacementPreviewResponse
 from .api import PowerUsage as PowerUsage
 from .api import PromptTokensDetails as PromptTokensDetails
+from .api import ResumeDeploymentResponse as ResumeDeploymentResponse
 from .api import StartDownloadParams as StartDownloadParams
 from .api import StartDownloadResponse as StartDownloadResponse
 from .api import StreamingChoiceResponse as StreamingChoiceResponse

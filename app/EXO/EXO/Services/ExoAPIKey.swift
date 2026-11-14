@@ -58,7 +58,9 @@ enum ExoAPIKey {
     /// The `EXO_API_KEY` value among the Settings rows encoded in `data`.
     ///
     /// Decodes what `ExoProcessController` persists, so the two stay tied to the
-    /// `CustomEnvironmentVariable` encoding and to its `storageKey`.
+    /// `CustomEnvironmentVariable` encoding and to its `storageKey`. The rows are
+    /// read the way `ExoLaunchSettings` hands them to the node: names trimmed,
+    /// and the last of several rows with one name winning.
     ///
     /// - Parameter data: the rows as stored in UserDefaults.
     /// - Returns: the row's value, or nil when there is no such row.
@@ -67,8 +69,8 @@ enum ExoAPIKey {
         guard let rows = try? decoder.decode([CustomEnvironmentVariable].self, from: data) else {
             return nil
         }
-        let match = rows.first {
-            $0.key.trimmingCharacters(in: .whitespaces) == "EXO_API_KEY"
+        let match = CustomEnvironmentVariable.sanitized(rows).first {
+            $0.key == "EXO_API_KEY"
         }
         return match?.value
     }

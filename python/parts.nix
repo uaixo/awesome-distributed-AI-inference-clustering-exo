@@ -62,6 +62,14 @@ let
             touch $siteDir/py.typed
           '';
         };
+        # mlx-lm takes its version from git with setuptools-scm, which writes
+        # mlx_lm/_version.py. Without setuptools-scm it installs as 0.0.0 without that
+        # file, and `import mlx_lm` fails. Its source in the nix store has no .git, so
+        # give setuptools-scm the locked version.
+        mlx-lm = prev.mlx-lm.overrideAttrs (old: {
+          nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ final.resolveBuildSystem { setuptools-scm = [ ]; };
+          SETUPTOOLS_SCM_PRETEND_VERSION = old.version;
+        });
       };
       buildSystemsOverlay = final: prev:
         lib.optionalAttrs isDarwin
@@ -84,8 +92,8 @@ let
                 nanobind = pkgs.fetchFromGitHub {
                   owner = "wjakob";
                   repo = "nanobind";
-                  rev = "v2.10.2";
-                  hash = "sha256-io44YhN+VpfHFWyvvLWSanRgbzA0whK8WlDNRi3hahU=";
+                  rev = "v3.1.0";
+                  hash = "sha256-k7TIsx+BcOaZKC01cMs4ZqCWG2uWbx1TkilbMq1qkdI=";
                   fetchSubmodules = true;
                 };
               in
@@ -116,6 +124,11 @@ let
                   (lib.cmakeBool "MLX_BUILD_METAL" true)
                   (lib.cmakeOptionType "string" "CMAKE_INSTALL_LIBDIR" "lib")
                   (lib.cmakeOptionType "filepath" "FETCHCONTENT_SOURCE_DIR_METAL_CPP" "${metal_cpp}")
+                  # metal-cpp calls Objective-C methods through pointers that may be nil (e.g.
+                  # ~SharedPtr releases a moved-from null), relying on messages to nil being
+                  # no-ops. Clang 21 treats such a call as undefined and turns the path into a
+                  # trap, so MLX built here can crash (SIGTRAP) where Apple's build does not.
+                  (lib.cmakeOptionType "string" "CMAKE_CXX_FLAGS" "-fno-delete-null-pointer-checks")
                   (lib.cmakeOptionType "string" "CMAKE_OSX_DEPLOYMENT_TARGET" "${pkgs.apple-sdk_26.version}")
                   (lib.cmakeOptionType "filepath" "CMAKE_OSX_SYSROOT" "${pkgs.apple-sdk_26.passthru.sdkroot}")
                 ] ++ lib.optionals (isDarwin && isx86_64) [
@@ -133,7 +146,16 @@ let
             '';
             autoPatchelfIgnoreMissingDeps = [ "libcuda.so.1" ];
           });
-        } // lib.optionalAttrs cudaSupport {
+        } // lib.optionalAttrs (isLinux && !cudaSupport) (
+          # The lock gives Linux torch's CUDA build, so it and its NVIDIA wheels are in
+          # the closure even without CUDA. Their CUDA and RDMA libraries are only needed
+          # on a GPU: leave them unresolved rather than failing auto-patchelf.
+          lib.mapAttrs
+            (_: pkg: pkg.overrideAttrs (_: { autoPatchelfIgnoreMissingDeps = true; }))
+            (lib.filterAttrs
+              (name: _: lib.hasPrefix "nvidia-" name || builtins.elem name [ "torch" "torchaudio" "torchvision" "triton" ])
+              prev)
+        ) // lib.optionalAttrs cudaSupport {
           "${libmlx_source}" = prev."${libmlx_source}".overrideAttrs (old: {
             nativeBuildInputs = old.nativeBuildInputs ++ [ pkgs.autoAddDriverRunpath ];
             buildInputs = old.buildInputs ++ cudaLibs;

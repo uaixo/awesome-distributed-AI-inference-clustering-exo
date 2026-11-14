@@ -4,7 +4,7 @@ from exo.shared.models.model_cards import ModelCard, ModelId, ModelTask
 from exo.shared.types.backends import Backend
 from exo.shared.types.common import NodeId
 from exo.shared.types.memory import Memory
-from exo.shared.types.tasks import BaseTask, TaskId
+from exo.shared.types.tasks import BaseTask, Task, TaskId
 from exo.shared.types.worker.instances import (
     BoundInstance,
     Instance,
@@ -21,8 +21,12 @@ class FakeRunnerSupervisor:
     bound_instance: BoundInstance
     status: RunnerStatus
     completed: set[TaskId] = field(default_factory=set)
-    in_progress: set[TaskId] = field(default_factory=set)
+    in_progress: dict[TaskId, Task] = field(default_factory=dict)
+    cancelled: set[TaskId] = field(default_factory=set)
     pending: dict[TaskId, object] = field(default_factory=dict)
+    awaiting_acknowledgement: bool = False
+    stopping: bool = False
+    peer_went: bool = False
 
 
 class OtherTask(BaseTask):

@@ -26,7 +26,11 @@
     nodeNames: string[];
     nodeIds: string[];
   };
-  type ModelFitStatus = "fits_now" | "fits_cluster_capacity" | "too_large";
+  type ModelFitStatus =
+    | "fits_now"
+    | "no_disk_space"
+    | "fits_cluster_capacity"
+    | "too_large";
 
   type ModelPickerGroupProps = {
     group: ModelGroup;
@@ -36,6 +40,8 @@
     selectedModelId: string | null;
     canModelFit: (id: string) => boolean;
     getModelFitStatus: (id: string) => ModelFitStatus;
+    /** Why a model doesn't fit, when it's not memory (e.g. disk space) */
+    getModelFitNote?: (id: string) => string | null;
     onToggleExpand: () => void;
     onSelectModel: (modelId: string) => void;
     onToggleFavorite: (baseModelId: string) => void;
@@ -53,6 +59,7 @@
     selectedModelId,
     canModelFit,
     getModelFitStatus,
+    getModelFitNote,
     onToggleExpand,
     onSelectModel,
     onToggleFavorite,
@@ -104,15 +111,18 @@
   );
   const groupFitStatus = $derived.by((): ModelFitStatus => {
     let hasClusterCapacityOnly = false;
+    let lacksDiskOnly = false;
     for (const variant of group.variants) {
       const fitStatus = getModelFitStatus(variant.id);
       if (fitStatus === "fits_now") {
         return "fits_now";
       }
+      if (fitStatus === "no_disk_space") lacksDiskOnly = true;
       if (fitStatus === "fits_cluster_capacity") {
         hasClusterCapacityOnly = true;
       }
     }
+    if (lacksDiskOnly) return "no_disk_space";
     return hasClusterCapacityOnly ? "fits_cluster_capacity" : "too_large";
   });
 
@@ -121,6 +131,7 @@
       case "fits_now":
         return "text-white/40";
       case "fits_cluster_capacity":
+      case "no_disk_space":
         return "text-orange-400/80";
       case "too_large":
         return "text-red-400/70";
@@ -321,8 +332,11 @@
         class="text-xs font-mono flex-shrink-0 {getSizeClassForFitStatus(
           singleVariantFitStatus,
         )}"
+        title={getModelFitNote?.(group.smallestVariant.id) ?? undefined}
       >
-        {formatSize(group.smallestVariant.storage_size_megabytes)}
+        {formatSize(
+          group.smallestVariant.storage_size_megabytes,
+        )}{#if singleVariantFitStatus === "no_disk_space"}{" · no disk space"}{/if}
       </span>
     {/if}
 
@@ -355,8 +369,8 @@
       <span
         class="flex-shrink-0"
         title={groupDownloadStatus.available
-          ? `Ready — downloaded on ${groupDownloadStatus.nodeNames.join(", ")}`
-          : `Downloaded on ${groupDownloadStatus.nodeNames.join(", ")} (may need more nodes)`}
+          ? `Downloaded on ${groupDownloadStatus.nodeNames.join(", ")}`
+          : `Downloaded on ${groupDownloadStatus.nodeNames.join(", ")} (may need more devices)`}
       >
         <svg
           class="w-4 h-4"
@@ -379,19 +393,20 @@
     <!-- Instance status badge -->
     {#if groupInstanceStatus}
       {#if groupInstanceStatus.status === "READY" || groupInstanceStatus.status === "LOADED" || groupInstanceStatus.status === "RUNNING"}
-        <span class="flex-shrink-0" title="Running">
+        <span class="flex-shrink-0 flex items-center gap-1" title="Ready">
           <svg
-            class="w-3 h-3 text-green-400"
+            class="w-2.5 h-2.5 text-green-400"
             viewBox="0 0 12 12"
             fill="currentColor"
           >
             <circle cx="6" cy="6" r="5" />
           </svg>
+          <span class="text-[10px] font-mono text-green-400">Ready</span>
         </span>
       {:else if groupInstanceStatus.status === "DOWNLOADING"}
-        <span class="flex-shrink-0 animate-pulse" title="Downloading">
+        <span class="flex-shrink-0 flex items-center gap-1" title="Downloading">
           <svg
-            class="w-3.5 h-3.5 text-blue-400"
+            class="w-3.5 h-3.5 text-blue-400 animate-pulse"
             viewBox="0 0 24 24"
             fill="none"
             stroke="currentColor"
@@ -403,16 +418,18 @@
             <polyline points="7 10 12 15 17 10" />
             <line x1="12" y1="15" x2="12" y2="3" />
           </svg>
+          <span class="text-[10px] font-mono text-blue-400">Downloading</span>
         </span>
       {:else if groupInstanceStatus.status === "LOADING" || groupInstanceStatus.status === "WARMING UP"}
-        <span class="flex-shrink-0 animate-pulse" title="Loading">
+        <span class="flex-shrink-0 flex items-center gap-1" title="Starting">
           <svg
-            class="w-3 h-3 text-yellow-400"
+            class="w-2.5 h-2.5 text-yellow-400 animate-pulse"
             viewBox="0 0 12 12"
             fill="currentColor"
           >
             <circle cx="6" cy="6" r="5" />
           </svg>
+          <span class="text-[10px] font-mono text-yellow-400">Starting</span>
         </span>
       {/if}
     {/if}
@@ -484,6 +501,15 @@
       </svg>
     </button>
   </div>
+  <!-- Why it doesn't fit, when it isn't memory: said, not only on hover -->
+  {#if !group.hasMultipleVariants && group.smallestVariant && getModelFitStatus(group.smallestVariant.id) === "no_disk_space"}
+    {@const note = getModelFitNote?.(group.smallestVariant.id)}
+    {#if note}
+      <p class="px-3 pl-5 pb-2 -mt-1 text-[11px] font-mono text-orange-400/80">
+        {note}
+      </p>
+    {/if}
+  {/if}
 
   <!-- Expanded variants -->
   {#if isExpanded && group.hasMultipleVariants}
@@ -528,8 +554,11 @@
             class="text-xs font-mono flex-1 {getSizeClassForFitStatus(
               fitStatus,
             )}"
+            title={getModelFitNote?.(variant.id) ?? undefined}
           >
-            {formatSize(variant.storage_size_megabytes)}
+            {formatSize(
+              variant.storage_size_megabytes,
+            )}{#if fitStatus === "no_disk_space"}{" · no disk space"}{/if}
           </span>
 
           <!-- Download indicator for this variant -->
@@ -563,19 +592,23 @@
           {#if instanceStatuses[variant.id]}
             {@const instStatus = instanceStatuses[variant.id]}
             {#if instStatus.status === "READY" || instStatus.status === "LOADED" || instStatus.status === "RUNNING"}
-              <span class="flex-shrink-0" title="Running">
+              <span class="flex-shrink-0 flex items-center gap-1" title="Ready">
                 <svg
-                  class="w-3 h-3 text-green-400"
+                  class="w-2.5 h-2.5 text-green-400"
                   viewBox="0 0 12 12"
                   fill="currentColor"
                 >
                   <circle cx="6" cy="6" r="5" />
                 </svg>
+                <span class="text-[10px] font-mono text-green-400">Ready</span>
               </span>
             {:else if instStatus.status === "DOWNLOADING"}
-              <span class="flex-shrink-0 animate-pulse" title="Downloading">
+              <span
+                class="flex-shrink-0 flex items-center gap-1"
+                title="Downloading"
+              >
                 <svg
-                  class="w-3.5 h-3.5 text-blue-400"
+                  class="w-3.5 h-3.5 text-blue-400 animate-pulse"
                   viewBox="0 0 24 24"
                   fill="none"
                   stroke="currentColor"
@@ -587,16 +620,25 @@
                   <polyline points="7 10 12 15 17 10" />
                   <line x1="12" y1="15" x2="12" y2="3" />
                 </svg>
+                <span class="text-[10px] font-mono text-blue-400"
+                  >Downloading</span
+                >
               </span>
             {:else if instStatus.status === "LOADING" || instStatus.status === "WARMING UP"}
-              <span class="flex-shrink-0 animate-pulse" title="Loading">
+              <span
+                class="flex-shrink-0 flex items-center gap-1"
+                title="Starting"
+              >
                 <svg
-                  class="w-3 h-3 text-yellow-400"
+                  class="w-2.5 h-2.5 text-yellow-400 animate-pulse"
                   viewBox="0 0 12 12"
                   fill="currentColor"
                 >
                   <circle cx="6" cy="6" r="5" />
                 </svg>
+                <span class="text-[10px] font-mono text-yellow-400"
+                  >Starting</span
+                >
               </span>
             {/if}
           {/if}
@@ -643,6 +685,16 @@
             </svg>
           </button>
         </div>
+        {#if fitStatus === "no_disk_space"}
+          {@const note = getModelFitNote?.(variant.id)}
+          {#if note}
+            <p
+              class="px-3 pl-10 pb-2 -mt-1 text-[11px] font-mono text-orange-400/80"
+            >
+              {note}
+            </p>
+          {/if}
+        {/if}
       {/each}
     </div>
   {/if}

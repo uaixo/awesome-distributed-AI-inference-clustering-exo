@@ -1,6 +1,9 @@
+from collections import defaultdict
 from collections.abc import Iterable, Mapping
+from collections.abc import Set as AbstractSet
 from copy import deepcopy
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Sequence, final
 
 from exo.master.placement_utils import (
@@ -20,21 +23,22 @@ from exo.shared.topology import Topology
 from exo.shared.types.backends import Backend
 from exo.shared.types.commands import (
     CancelDownload,
-    CreateInstance,
-    DeleteInstance,
     DownloadCommand,
-    PlaceInstance,
 )
 from exo.shared.types.common import NodeId
 from exo.shared.types.events import (
     Event,
-    InstanceCreated,
     InstanceDeleted,
-    TaskStatusUpdated,
 )
 from exo.shared.types.memory import Memory
-from exo.shared.types.profiling import MemoryUsage, NodeNetworkInfo, NodeRdmaCtlStatus
-from exo.shared.types.tasks import Task, TaskId, TaskStatus
+from exo.shared.types.placement import PlacementRequest
+from exo.shared.types.profiling import (
+    MemoryUsage,
+    NodeIdentity,
+    NodeNetworkInfo,
+    NodeRdmaCtlStatus,
+)
+from exo.shared.types.state import State
 from exo.shared.types.worker.downloads import (
     DownloadCompleted,
     DownloadFailed,
@@ -46,11 +50,30 @@ from exo.shared.types.worker.instances import (
     Instance,
     InstanceId,
     InstanceMeta,
+    InstanceRemovalReason,
     MlxJacclInstance,
     MlxRingInstance,
 )
-from exo.shared.types.worker.shards import Sharding
+from exo.shared.types.worker.runners import (
+    RunnerId,
+    RunnerLoaded,
+    RunnerLoading,
+    RunnerReady,
+    RunnerRunning,
+    RunnerShutdown,
+    RunnerShuttingDown,
+    RunnerStatus,
+    RunnerWarmingUp,
+    ShardAssignments,
+)
+from exo.shared.types.worker.shards import (
+    Sharding,
+    ShardMetadata,
+    TensorShardMetadata,
+)
 from exo.utils.ports import random_ephemeral_port
+from exo.worker.engines.mlx.models.spec import PlacementRules
+from exo.worker.engines.mlx.models.spec_registry import placement_rules_for_model_type
 
 INSTANCE_META_BACKENDS: dict[InstanceMeta, list[Backend]] = {
     InstanceMeta.MlxRing: [Backend.MlxMetal, Backend.MlxCuda, Backend.MlxCpu],
@@ -58,14 +81,38 @@ INSTANCE_META_BACKENDS: dict[InstanceMeta, list[Backend]] = {
 }
 
 
-def add_instance_to_placements(
-    command: CreateInstance,
-    topology: Topology,
-    current_instances: Mapping[InstanceId, Instance],
-) -> Mapping[InstanceId, Instance]:
-    # TODO: validate against topology
+def launch_refusal(instance: Instance, state: State) -> str | None:
+    """Why the master refuses to launch the instance, if it does: a node isn't in the cluster,
+    or can't hold its shard besides the instances already there (some perhaps still loading).
 
-    return {**current_instances, command.instance.instance_id: command.instance}
+    A node outside the cluster: the master's next check would delete the instance at once, as
+    one that lost a node. Refused instead: the API sends a launch again until it shows, by when
+    a node that is coming back (a split healing, say) is in the cluster again. Memory: two
+    launches sent at the same time were otherwise both placed in memory that holds one. The
+    API checks a launch the same way before sending it, but against its own state, which may
+    not show the other launch yet."""
+    if outside := [
+        node_id
+        for node_id in instance.shard_assignments.node_to_runner
+        if not state.topology.contains_node(node_id)
+    ]:
+        return f"node(s) {outside} aren't in the cluster"
+    return instance_beyond_memory(instance, state)
+
+
+def instance_beyond_memory(instance: Instance, state: State) -> str | None:
+    """Why a node can't hold its shard of the instance besides the instances in the state (some
+    of them perhaps still loading), or None if every node can. The master checks a launch
+    with it against its own state: two launches sent at the same time were otherwise both
+    placed in memory that holds one. The API checks a launch the same way before sending it,
+    but against its own state, which may not show the other launch yet."""
+    return shard_beyond_memory(
+        instance.shard_assignments,
+        usable_memory(
+            memory_once_loaded(state.node_memory, state.instances, state.runners)
+        ),
+        state.node_identities,
+    )
 
 
 def _get_node_download_fraction(
@@ -107,6 +154,152 @@ def _cycle_download_score(
     )
 
 
+def _not_enough_memory(
+    request: PlacementRequest,
+    cycles: Sequence[Cycle],
+    node_memory: Mapping[NodeId, MemoryUsage],
+) -> str:
+    reported = [cycle for cycle in cycles if all(node in node_memory for node in cycle)]
+    if not reported:
+        return "Waiting for the nodes to report their memory"
+    free = {
+        node_id: usage.ram_available.in_bytes for node_id, usage in node_memory.items()
+    }
+    most_free = Memory.from_bytes(
+        max(sum(free[node] for node in cycle) for cycle in reported)
+    )
+    return (
+        f"Not enough memory: {request.model_card.model_id} needs "
+        f"{request.model_card.resident_size.in_gb:.1f} GB, but connected nodes can use at most "
+        f"{most_free.in_gb:.1f} GB between them"
+    )
+
+
+def _node_name(node_id: NodeId, node_identities: Mapping[NodeId, NodeIdentity]) -> str:
+    identity = node_identities.get(node_id)
+    if identity is None or identity.friendly_name == NodeIdentity().friendly_name:
+        return str(node_id)
+    return identity.friendly_name
+
+
+def _tensor_share_too_large(
+    request: PlacementRequest,
+    cycles: Sequence[Cycle],
+    node_memory: Mapping[NodeId, MemoryUsage],
+    node_identities: Mapping[NodeId, NodeIdentity],
+) -> str:
+    # Explain the group of nodes that comes closest to holding its shares
+    cycle = max(
+        cycles,
+        key=lambda c: min(node_memory[n].ram_available for n in c).in_bytes * len(c),
+    )
+    smallest = min(cycle, key=lambda n: node_memory[n].ram_available)
+    share = request.model_card.resident_size // len(cycle)
+    return (
+        f"Tensor sharding gives each of {len(cycle)} nodes {share.in_gb:.1f} GB of "
+        f"{request.model_card.model_id}, but {_node_name(smallest, node_identities)} can "
+        f"use only about {node_memory[smallest].ram_available.in_gb:.1f} GB. Use Pipeline "
+        "sharding, which splits the model by each node's memory, or nodes with more memory"
+    )
+
+
+def shard_beyond_memory(
+    shard_assignments: ShardAssignments,
+    node_memory: Mapping[NodeId, MemoryUsage],
+    node_identities: Mapping[NodeId, NodeIdentity],
+) -> str | None:
+    """Why a node can't hold its shard of the model, or None if every node can."""
+    for node_id, runner_id in shard_assignments.node_to_runner.items():
+        name = _node_name(node_id, node_identities)
+        usage = node_memory.get(node_id)
+        if usage is None:
+            return f"Waiting for {name} to report its memory"
+        shard = shard_assignments.runner_to_shard[runner_id]
+        share = Memory.from_bytes(shard_bytes(shard))
+        if share > usage.ram_available:
+            return (
+                f"Not enough memory: {name} can use only about "
+                f"{usage.ram_available.in_gb:.1f} GB, but its shard of "
+                f"{shard.model_card.model_id} needs {share.in_gb:.1f} GB"
+            )
+    return None
+
+
+def usable_memory(
+    node_memory: Mapping[NodeId, MemoryUsage],
+) -> dict[NodeId, MemoryUsage]:
+    """Each node's memory with `ram_available` cut to what a model can use there.
+
+    A Mac's GPU can use only its working set (about 75% of the RAM), so an idle Mac has more
+    memory free than a model can use. A runner whose shard needs more aborts while loading.
+    """
+    return {
+        node_id: usage
+        if usage.gpu_working_set is None or usage.gpu_working_set >= usage.ram_available
+        else usage.model_copy(update={"ram_available": usage.gpu_working_set})
+        for node_id, usage in node_memory.items()
+    }
+
+
+# Runners whose memory is already in their node's report (loaded), or about to be freed
+_NOT_PENDING = (
+    RunnerLoaded,
+    RunnerWarmingUp,
+    RunnerReady,
+    RunnerRunning,
+    RunnerShuttingDown,
+    RunnerShutdown,
+)
+
+
+def shard_bytes(shard: ShardMetadata) -> int:
+    """The memory a runner needs for its shard of the model."""
+    storage = shard.model_card.resident_size.in_bytes
+    if isinstance(shard, TensorShardMetadata):
+        return storage // shard.world_size
+    if shard.n_layers == 0:
+        return storage
+    return storage * (shard.end_layer - shard.start_layer) // shard.n_layers
+
+
+def memory_once_loaded(
+    node_memory: Mapping[NodeId, MemoryUsage],
+    instances: Mapping[InstanceId, Instance],
+    runners: Mapping[RunnerId, RunnerStatus],
+) -> dict[NodeId, MemoryUsage]:
+    """Each node's free memory once the runners placed on it have loaded.
+
+    A node reports the memory its loaded models use. A runner that is still starting or loading
+    (or failed, and will load again) hasn't taken its memory yet, so without this the next
+    placement would see that memory as free and could put a second model in it. Of a runner
+    that is loading, only the layers it hasn't loaded yet are counted: the node's report has the
+    others. Counting the whole shard counted those layers twice, and refused a second model that
+    fitted while the first one was finishing its load.
+    """
+    pending: defaultdict[NodeId, int] = defaultdict(int)
+    for instance in instances.values():
+        assignments = instance.shard_assignments
+        for node_id, runner_id in assignments.node_to_runner.items():
+            status = runners.get(runner_id)
+            if isinstance(status, _NOT_PENDING):
+                continue
+            shard = shard_bytes(assignments.runner_to_shard[runner_id])
+            if isinstance(status, RunnerLoading) and status.total_layers > 0:
+                unloaded = max(0, status.total_layers - status.layers_loaded)
+                shard = shard * unloaded // status.total_layers
+            pending[node_id] += shard
+    return {
+        node_id: usage.model_copy(
+            update={
+                "ram_available": Memory.from_bytes(
+                    max(0, usage.ram_available.in_bytes - pending[node_id])
+                )
+            }
+        )
+        for node_id, usage in node_memory.items()
+    }
+
+
 CyclesByLength = Mapping[int, Sequence[Cycle]]
 """Cycles grouped by node count, each group in the order the search produced them.
 
@@ -127,6 +320,13 @@ class CycleSearch:
 
     max_cycle_nodes: int | None
     """The largest ring enumerated, or None when every ring in the topology was."""
+
+    in_search_order: Sequence[Cycle] | None = None
+    """The same cycles ungrouped, in the order the search produced them, when it kept that.
+
+    Only the wording of a failure depends on it: the reason no ring could be placed on
+    names the first of equally good rings.
+    """
 
     @property
     def cycles(self) -> list[Cycle]:
@@ -187,136 +387,238 @@ def search_placement_cycles(
     iterator and the walk is abandoned once the budget is passed.
 
     Call this once per request and pass the result to every ``place_instance`` call that
-    request makes: the enumeration does not depend on the command, so repeating it per
+    request makes: the enumeration does not depend on the request, so repeating it per
     candidate multiplies the cost by the number of candidates.
     """
     every_cycle = topology.get_cycles_within_budget(max_cycles)
     if every_cycle is not None:
         return CycleSearch(
-            by_length=group_cycles_by_length(every_cycle), max_cycle_nodes=None
+            by_length=group_cycles_by_length(every_cycle),
+            max_cycle_nodes=None,
+            in_search_order=every_cycle,
         )
+    short_cycles = topology.get_cycles_up_to(max_cycle_nodes)
     return CycleSearch(
-        by_length=group_cycles_by_length(topology.get_cycles_up_to(max_cycle_nodes)),
+        by_length=group_cycles_by_length(short_cycles),
         max_cycle_nodes=max_cycle_nodes,
+        in_search_order=short_cycles,
     )
 
 
-def _cycles_the_sharding_allows(
-    command: PlaceInstance, cycles: Sequence[Cycle]
+def _cycles_tensor_can_divide(
+    request: PlacementRequest,
+    cycles: Sequence[Cycle],
+    placement_rules: PlacementRules,
 ) -> list[Cycle]:
-    """Keep the cycles whose node count the requested sharding can actually use."""
-    if command.sharding == Sharding.Tensor:
-        # TODO: the condition here for tensor parallel is not correct, but it works good enough for now.
-        # DeepSeek V4 is MQA (num_key_value_heads=1) but its sharding strategy
-        # head-parallelises wq_b/wo_a and shards MoE experts instead of splitting
-        # KV heads, so the kv-head divisibility check doesn't apply.
-        is_deepseek_v4 = command.model_card.base_model.startswith("DeepSeek V4")
-        kv_heads = command.model_card.num_key_value_heads
-        return [
-            cycle
-            for cycle in cycles
-            if command.model_card.hidden_size % len(cycle) == 0
-            and (is_deepseek_v4 or kv_heads is None or kv_heads % len(cycle) == 0)
-        ]
+    """Keep the cycles whose node count divides what tensor sharding splits."""
+    # TODO: the condition here for tensor parallel is not correct, but it works good enough for now.
+    splits_kv_heads = placement_rules.tensor_parallel_splits_kv_heads
+    kv_heads = request.model_card.num_key_value_heads
+    return [
+        cycle
+        for cycle in cycles
+        if request.model_card.hidden_size % len(cycle) == 0
+        and (not splits_kv_heads or kv_heads is None or kv_heads % len(cycle) == 0)
+        and all(
+            number % len(cycle) == 0
+            for number in placement_rules.tensor_parallel_divides
+        )
+    ]
+
+
+def _cycles_holding_tensor_shares(
+    request: PlacementRequest,
+    cycles: Sequence[Cycle],
+    node_memory: Mapping[NodeId, MemoryUsage],
+) -> list[Cycle]:
+    """Keep the cycles whose every node can hold its equal share of the model.
+
+    Tensor sharding splits every layer evenly, so each node needs an equal share: enough
+    memory between the nodes is no use if one of them can't hold its share.
+    """
+    return [
+        cycle
+        for cycle in cycles
+        if all(
+            node_memory[node].ram_available
+            >= request.model_card.resident_size // len(cycle)
+            for node in cycle
+        )
+    ]
+
+
+def _cycles_the_sharding_allows(
+    request: PlacementRequest,
+    cycles: Sequence[Cycle],
+    node_memory: Mapping[NodeId, MemoryUsage],
+    placement_rules: PlacementRules,
+) -> list[Cycle]:
+    """Keep the cycles the requested sharding can actually use."""
+    if request.sharding == Sharding.Tensor:
+        return _cycles_holding_tensor_shares(
+            request,
+            _cycles_tensor_can_divide(request, cycles, placement_rules),
+            node_memory,
+        )
     if (
-        command.sharding == Sharding.Pipeline
-        and command.model_card.base_model.startswith("Gemma 4")
+        request.sharding == Sharding.Pipeline
+        and placement_rules.multi_node_pipeline_error is not None
     ):
         return [cycle for cycle in cycles if len(cycle) == 1]
     return list(cycles)
 
 
-def _reject_sharding_the_model_cannot_do(command: PlaceInstance) -> None:
+def _reject_sharding_the_model_cannot_do(
+    request: PlacementRequest, placement_rules: PlacementRules
+) -> None:
     """Raise for a sharding this model never supports, whatever the topology offers."""
-    if command.sharding == Sharding.Tensor and not command.model_card.supports_tensor:
+    if request.sharding == Sharding.Tensor and not request.model_card.supports_tensor:
         raise ValueError(
-            f"Requested Tensor sharding but this model does not support tensor parallelism: {command.model_card.model_id}"
+            f"Requested Tensor sharding but this model does not support tensor parallelism: {request.model_card.model_id}"
         )
-    if command.sharding == Sharding.Pipeline and command.model_card.model_id == ModelId(
-        "mlx-community/DeepSeek-V3.1-8bit"
-    ):
-        raise ValueError(
-            "Pipeline parallelism is not supported for DeepSeek V3.1 (8-bit)"
-        )
+    if request.sharding == Sharding.Pipeline:
+        for model_id, error in placement_rules.pipeline_unsupported_model_ids:
+            if request.model_card.model_id == ModelId(model_id):
+                raise ValueError(error)
 
 
-def _no_placement_reason(command: PlaceInstance, checked_model: bool) -> str:
-    """Why no cycle could be placed on, in the order a reader would check the causes."""
-    if not checked_model:
-        return "No cycles found with sufficient memory"
-    if command.sharding == Sharding.Tensor:
-        kv_heads = command.model_card.num_key_value_heads
-        return (
-            f"No tensor sharding found for model with "
-            f"hidden_size={command.model_card.hidden_size}"
-            f"{f', num_key_value_heads={kv_heads}' if kv_heads is not None else ''}"
-            f" across candidate cycles"
+def _no_placement_reason(
+    request: PlacementRequest,
+    cycles: Sequence[Cycle],
+    node_memory: Mapping[NodeId, MemoryUsage],
+    required_nodes: set[NodeId] | None,
+    node_identities: Mapping[NodeId, NodeIdentity],
+    placement_rules: PlacementRules,
+) -> str:
+    """Why none of ``cycles`` can be placed on: the first obstacle, in the order a reader
+    would check them.
+
+    Only called once every group has been walked and none survived, so it can afford to
+    look at every cycle: nodes at all, enough of them connected, the chosen nodes
+    connected, memory between them, and then what the sharding can use.
+    """
+    if not cycles:
+        return "No nodes are available"
+    candidate_cycles = [cycle for cycle in cycles if len(cycle) >= request.min_nodes]
+    if not candidate_cycles:
+        largest = max(len(cycle) for cycle in cycles)
+        return f"Needs {request.min_nodes} connected nodes, but at most {largest} are connected to each other"
+    if required_nodes:
+        candidate_cycles = [
+            cycle
+            for cycle in candidate_cycles
+            if required_nodes.issubset(cycle.node_ids)
+        ]
+        if not candidate_cycles:
+            return "The chosen nodes aren't all connected to each other"
+    cycles_with_sufficient_memory = filter_cycles_by_memory(
+        candidate_cycles, node_memory, request.model_card.resident_size
+    )
+    if not cycles_with_sufficient_memory:
+        return _not_enough_memory(request, candidate_cycles, node_memory)
+    if request.sharding == Sharding.Tensor:
+        divisible_cycles = _cycles_tensor_can_divide(
+            request, cycles_with_sufficient_memory, placement_rules
         )
-    return "Pipeline parallelism is not supported for Gemma 4; use tensor parallelism instead."
+        if not divisible_cycles:
+            kv_heads = request.model_card.num_key_value_heads
+            return (
+                f"No tensor sharding found for model with "
+                f"hidden_size={request.model_card.hidden_size}"
+                f"{f', num_key_value_heads={kv_heads}' if kv_heads is not None else ''}"
+                f" across candidate cycles"
+            )
+        return _tensor_share_too_large(
+            request, divisible_cycles, node_memory, node_identities
+        )
+    if placement_rules.multi_node_pipeline_error is not None:
+        return placement_rules.multi_node_pipeline_error
+    raise AssertionError("every cycle that holds the model suits pipeline sharding")
 
 
 def _smallest_placeable_cycles(
-    command: PlaceInstance,
+    request: PlacementRequest,
     cycle_search: CycleSearch,
     node_count: int,
     node_memory: Mapping[NodeId, MemoryUsage],
     required_nodes: set[NodeId] | None,
+    allowed_nodes: AbstractSet[NodeId] | None,
+    node_identities: Mapping[NodeId, NodeIdentity],
 ) -> list[Cycle]:
-    """The smallest group of equal-length cycles this command can be placed on.
+    """The smallest group of equal-length cycles this request can be placed on.
 
-    Walks the groups shortest first and returns the first that survives the required
-    nodes, the memory the model needs, and what the sharding can use. Stopping there is
-    what filtering every cycle and then taking the shortest survivors amounts to, since
-    the three filters look only at a cycle's nodes, so a longer group can never displace
-    a shorter one that passed. The difference is cost: the groups past the answer are
-    never walked, and on a fully meshed cluster they hold almost every cycle.
+    Walks the groups shortest first and returns the first that survives the allowed and
+    required nodes, the memory the model needs, and what the sharding can use. Stopping
+    there is what filtering every cycle and then taking the shortest survivors amounts
+    to, since every filter looks only at a cycle's nodes, so a longer group can never
+    displace a shorter one that passed. The difference is cost: the groups past the
+    answer are never walked, and on a fully meshed cluster they hold almost every cycle.
 
-    Raises ValueError naming the first obstacle, in the order a reader would check them:
-    nothing with enough memory, then a sharding the model cannot do, then no cycle whose
-    node count that sharding can use. Raises ``PlacementSearchTruncatedError`` instead when the
-    search was bounded and the cluster has more nodes than the bound, since then a ring
-    that was never enumerated might have been placeable and no other message may claim
-    the cluster cannot hold the model.
+    Raises ValueError naming the first obstacle, in the order a reader would check them
+    (see ``_no_placement_reason``). Raises ``PlacementSearchTruncatedError`` instead when
+    the search was bounded and the cluster has more nodes than the bound, since then a
+    ring that was never enumerated might have been placeable and no other message may
+    claim the cluster cannot hold the model.
     """
+    placement_rules = placement_rules_for_model_type(request.model_card.model_type)
     cycles_by_length = cycle_search.by_length
-    lengths = sorted(
-        length for length in cycles_by_length if length >= command.min_nodes
-    )
     checked_model = False
-    for length in lengths:
+    for length in sorted(
+        length for length in cycles_by_length if length >= request.min_nodes
+    ):
         group: Sequence[Cycle] = cycles_by_length[length]
+        if allowed_nodes is not None:
+            group = [cycle for cycle in group if set(cycle.node_ids) <= allowed_nodes]
         if required_nodes:
             group = [
                 cycle for cycle in group if required_nodes.issubset(cycle.node_ids)
             ]
         with_memory = filter_cycles_by_memory(
-            list(group), node_memory, command.model_card.storage_size
+            list(group), node_memory, request.model_card.resident_size
         )
         if not with_memory:
             continue
         if not checked_model:
             # Only reachable once something fits in memory, so that a cluster too small
             # for the model still reports memory rather than the sharding.
-            _reject_sharding_the_model_cannot_do(command)
+            _reject_sharding_the_model_cannot_do(request, placement_rules)
             checked_model = True
-        allowed = _cycles_the_sharding_allows(command, with_memory)
+        allowed = _cycles_the_sharding_allows(
+            request, with_memory, node_memory, placement_rules
+        )
         if allowed:
             return allowed
 
+    every_cycle: Sequence[Cycle] = (
+        cycle_search.cycles
+        if cycle_search.in_search_order is None
+        else cycle_search.in_search_order
+    )
+    if allowed_nodes is not None:
+        every_cycle = [
+            cycle for cycle in every_cycle if set(cycle.node_ids) <= allowed_nodes
+        ]
+    reason = _no_placement_reason(
+        request,
+        every_cycle,
+        node_memory,
+        required_nodes,
+        node_identities,
+        placement_rules,
+    )
     max_cycle_nodes = cycle_search.max_cycle_nodes
     if max_cycle_nodes is not None and node_count > max_cycle_nodes:
         raise PlacementSearchTruncatedError(
             f"Rings of more than {max_cycle_nodes} nodes were not searched on this "
             f"{node_count} node cluster, because enumerating them costs more than the "
-            f"placement budget allows. Within the rings that were searched: "
-            f"{_no_placement_reason(command, checked_model)}",
+            f"placement budget allows. Within the rings that were searched: {reason}",
             max_cycle_nodes=max_cycle_nodes,
         )
-    raise ValueError(_no_placement_reason(command, checked_model))
+    raise ValueError(reason)
 
 
 def place_instance(
-    command: PlaceInstance,
+    request: PlacementRequest,
     topology: Topology,
     current_instances: Mapping[InstanceId, Instance],
     node_memory: Mapping[NodeId, MemoryUsage],
@@ -325,36 +627,59 @@ def place_instance(
     required_nodes: set[NodeId] | None = None,
     download_status: Mapping[NodeId, Sequence[DownloadProgress]] | None = None,
     node_rdma_ctl: Mapping[NodeId, NodeRdmaCtlStatus] | None = None,
+    runners: Mapping[RunnerId, RunnerStatus] | None = None,
+    node_identities: Mapping[NodeId, NodeIdentity] | None = None,
+    allowed_nodes: AbstractSet[NodeId] | None = None,
+    cycles: Sequence[Cycle] | None = None,
     *,
-    cycle_search: CycleSearch,
+    cycle_search: CycleSearch | None = None,
 ) -> dict[InstanceId, Instance]:
-    """Build the instance this command places, or raise ValueError explaining why not.
+    """Place an instance of the requested model on the best group of nodes.
 
-    ``cycle_search`` must be the rings of ``topology`` — ``search_placement_cycles``
-    produces exactly that. It is a parameter rather than something this function
-    enumerates because enumerating is the expensive part and does not depend on
-    ``command``, so a caller trying several commands against one topology enumerates once
-    and this walks only the group it places on. It carries the ring size the search
-    stopped at as well as the rings, so a failure can say a ring size was not searched
-    rather than that nothing fits.
+    Pass the cluster's `runners` so that memory taken by instances that haven't loaded yet is
+    counted as used; without them every instance is assumed loaded. `node_identities` name the
+    nodes in errors. With `allowed_nodes`, only groups of those nodes are considered.
+    `cycles` are the topology's, if the caller has them: finding them is the costly part, and
+    grows quickly with the number of nodes.
+
+    ``cycle_search`` is the same thing with a bound on its cost, and wins over `cycles`:
+    ``search_placement_cycles`` produces it. It carries the ring size the search stopped
+    at as well as the rings, so a failure can say a ring size was not searched rather than
+    that nothing fits. A caller trying several requests against one topology searches once
+    and this walks only the group it places on. With neither, every cycle of the topology
+    is enumerated here.
     """
+    if runners is not None:
+        node_memory = memory_once_loaded(node_memory, current_instances, runners)
+    node_memory = usable_memory(node_memory)
+    if cycle_search is None:
+        if cycles is None:
+            cycles = topology.get_cycles()
+        cycle_search = CycleSearch(
+            by_length=group_cycles_by_length(cycles),
+            max_cycle_nodes=None,
+            in_search_order=cycles,
+        )
+
     smallest_cycles = _smallest_placeable_cycles(
-        command,
+        request,
         cycle_search,
         len(list(topology.list_nodes())),
         node_memory,
         required_nodes,
+        allowed_nodes,
+        node_identities or {},
     )
 
-    required_backends = set(INSTANCE_META_BACKENDS[command.instance_meta]) & set(
-        command.model_card.backends
+    required_backends = set(INSTANCE_META_BACKENDS[request.instance_meta]) & set(
+        request.model_card.backends
     )
     if not required_backends:
         raise ValueError(
-            f"Model {command.model_card.model_id} backends "
-            f"{sorted(b.value for b in command.model_card.backends)} cannot satisfy engine "
-            f"{command.instance_meta.value} which requires "
-            f"{sorted(b.value for b in INSTANCE_META_BACKENDS[command.instance_meta])}"
+            f"Model {request.model_card.model_id} backends "
+            f"{sorted(b.value for b in request.model_card.backends)} cannot satisfy engine "
+            f"{request.instance_meta.value} which requires "
+            f"{sorted(b.value for b in INSTANCE_META_BACKENDS[request.instance_meta])}"
         )
     smallest_cycles = [
         cycle
@@ -366,7 +691,7 @@ def place_instance(
     if not smallest_cycles:
         raise ValueError(
             f"No cycle where every node supports a backend in "
-            f"{sorted(b.value for b in required_backends)} for {command.model_card.model_id}"
+            f"{sorted(b.value for b in required_backends)} for {request.model_card.model_id}"
         )
 
     rdma_ctl_status = node_rdma_ctl or {}
@@ -383,7 +708,7 @@ def place_instance(
         if topology.is_rdma_cycle(cycle) and _all_rdma_ctl_enabled(cycle)
     ]
 
-    if command.instance_meta == InstanceMeta.MlxJaccl:
+    if request.instance_meta == InstanceMeta.MlxJaccl:
         if not smallest_rdma_cycles:
             raise ValueError(
                 "Requested RDMA (MlxJaccl) but no RDMA-connected cycles available"
@@ -405,7 +730,7 @@ def place_instance(
         candidate_cycles,
         key=lambda cycle: (
             _cycle_download_score(
-                cycle, command.model_card.model_id, resolved_download_status
+                cycle, request.model_card.model_id, resolved_download_status
             ),
             sum(
                 (node_memory[node_id].ram_available for node_id in cycle),
@@ -416,7 +741,7 @@ def place_instance(
 
     # Single-node: force Pipeline/Ring (Tensor and Jaccl require multi-node)
     if len(selected_cycle) == 1:
-        command = command.model_copy(
+        request = request.model_copy(
             update={
                 "instance_meta": InstanceMeta.MlxRing,
                 "sharding": Sharding.Pipeline,
@@ -424,7 +749,7 @@ def place_instance(
         )
 
     shard_assignments = get_shard_assignments(
-        command.model_card, selected_cycle, command.sharding, node_memory
+        request.model_card, selected_cycle, request.sharding, node_memory
     )
 
     cycle_digraph: Topology = topology.get_subgraph_from_nodes(selected_cycle.node_ids)
@@ -432,7 +757,7 @@ def place_instance(
     instance_id = InstanceId()
     target_instances = dict(deepcopy(current_instances))
 
-    match command.instance_meta:
+    match request.instance_meta:
         case InstanceMeta.MlxJaccl:
             # TODO(evan): shard assignments should contain information about ranks, this is ugly
             def get_device_rank(node_id: NodeId) -> int:
@@ -483,54 +808,16 @@ def place_instance(
     return target_instances
 
 
-def delete_instance(
-    command: DeleteInstance,
-    current_instances: Mapping[InstanceId, Instance],
-) -> dict[InstanceId, Instance]:
-    target_instances = dict(deepcopy(current_instances))
-    if command.instance_id in target_instances:
-        del target_instances[command.instance_id]
-        return target_instances
-    raise ValueError(f"Instance {command.instance_id} not found")
-
-
-def get_transition_events(
-    current_instances: Mapping[InstanceId, Instance],
-    target_instances: Mapping[InstanceId, Instance],
-    tasks: Mapping[TaskId, Task],
+def removal_events(
+    instance_id: InstanceId,
+    reason: InstanceRemovalReason,
+    at: datetime,
 ) -> Sequence[Event]:
-    events: list[Event] = []
-
-    # find instances to create
-    for instance_id, instance in target_instances.items():
-        if instance_id not in current_instances:
-            events.append(
-                InstanceCreated(
-                    instance=instance,
-                )
-            )
-
-    # find instances to delete
-    for instance_id in current_instances:
-        if instance_id not in target_instances:
-            for task in tasks.values():
-                if task.instance_id == instance_id and task.task_status in [
-                    TaskStatus.Pending,
-                    TaskStatus.Running,
-                ]:
-                    events.append(
-                        TaskStatusUpdated(
-                            task_status=TaskStatus.Cancelled,
-                            task_id=task.task_id,
-                        )
-                    )
-
-            events.append(
-                InstanceDeleted(
-                    instance_id=instance_id,
-                )
-            )
-
+    """Remove an instance. Its requests aren't in the cluster's state: the nodes serving them
+    end them as the instance goes (exo.worker.serving)."""
+    events: list[Event] = [
+        InstanceDeleted(instance_id=instance_id, reason=reason, at=at.isoformat())
+    ]
     return events
 
 

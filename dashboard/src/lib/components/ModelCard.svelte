@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { exoYellow } from "$lib/utils/brand_colors";
   import type {
     DownloadProgress,
     NodeInfo,
@@ -8,7 +9,13 @@
   import { debugMode, topologyData } from "$lib/stores/app.svelte";
 
   interface Props {
-    model: { id: string; name?: string; storage_size_megabytes?: number };
+    model: {
+      id: string;
+      name?: string;
+      base_model?: string;
+      quantization?: string;
+      storage_size_megabytes?: number;
+    };
     isLaunching?: boolean;
     downloadStatus?: {
       isDownloading: boolean;
@@ -28,6 +35,8 @@
     tags?: string[];
     apiPreview?: PlacementPreview | null;
     modelIdOverride?: string | null;
+    /** An instance of this model already exists, so starting adds a second copy */
+    existingInstance?: "running" | "starting" | null;
   }
 
   let {
@@ -41,7 +50,17 @@
     tags = [],
     apiPreview = null,
     modelIdOverride = null,
+    existingInstance = null,
   }: Props = $props();
+
+  // Display name ("Llama 3.2 1B · 4bit"); the repo id is shown under it
+  const displayName = $derived(
+    model.base_model
+      ? model.quantization
+        ? `${model.base_model} · ${model.quantization}`
+        : model.base_model
+      : model.name || model.id,
+  );
 
   // Estimate memory requirements from model name
   // Uses regex with word boundaries to avoid false matches like '4bit' matching '4b'
@@ -490,7 +509,7 @@
   <div
     class="bg-exo-dark-gray/60 border {canFit
       ? 'border-exo-yellow/20 group-hover:border-exo-yellow/40'
-      : 'border-red-500/20'} p-3 transition-all duration-200 group-hover:shadow-[0_0_15px_rgba(255,215,0,0.1)]"
+      : 'border-red-500/20'} p-3 transition-all duration-200 group-hover:shadow-[0_0_15px_color-mix(in_srgb,var(--exo-yellow)_10%,transparent)]"
   >
     <!-- Model Name & Memory Required -->
     <div class="flex items-start justify-between gap-2 mb-2">
@@ -498,9 +517,9 @@
         <div class="flex items-center gap-2">
           <div
             class="text-exo-yellow text-xs font-mono tracking-wide truncate"
-            title={model.name || model.id}
+            title={model.id}
           >
-            {model.name || model.id}
+            {displayName}
           </div>
           {#if huggingFaceModelId}
             <a
@@ -542,7 +561,7 @@
             </div>
           {/if}
         </div>
-        {#if model.name && model.name !== model.id}
+        {#if displayName !== model.id}
           <div
             class="text-xs text-exo-light-gray font-mono truncate mt-0.5"
             title={model.id}
@@ -575,13 +594,13 @@
       <span
         class="px-1.5 py-0.5 text-xs font-mono tracking-wider uppercase bg-exo-medium-gray/30 text-exo-light-gray border border-exo-medium-gray/40"
         title={runtime === "MlxRing"
-          ? "Ring: standard networking. Works over any connection (Wi-Fi, Ethernet, Thunderbolt)."
-          : "RDMA: direct memory access over Thunderbolt. Significantly faster for multi-device inference."}
+          ? "Standard (TCP/IP): works over any connection (Wi-Fi, Ethernet, Thunderbolt)."
+          : "RDMA over Thunderbolt: direct memory access between devices. Much faster when a model is split across devices."}
       >
         {runtime === "MlxRing"
-          ? "MLX Ring"
+          ? "Standard (TCP/IP)"
           : runtime === "MlxJaccl"
-            ? "MLX RDMA"
+            ? "RDMA over Thunderbolt"
             : runtime}
       </span>
     </div>
@@ -640,7 +659,7 @@
       >
         <!-- Scanline effect -->
         <div
-          class="absolute inset-0 bg-[repeating-linear-gradient(0deg,transparent,transparent_2px,rgba(255,215,0,0.02)_2px,rgba(255,215,0,0.02)_4px)] pointer-events-none"
+          class="absolute inset-0 bg-[repeating-linear-gradient(0deg,transparent,transparent_2px,color-mix(in_srgb,var(--exo-yellow)_2%,transparent)_2px,color-mix(in_srgb,var(--exo-yellow)_2%,transparent)_4px)] pointer-events-none"
         ></div>
 
         <svg
@@ -718,7 +737,7 @@
                   y1={node.y}
                   x2={node2.x}
                   y2={node2.y}
-                  stroke={node.isUsed && node2.isUsed ? "#FFD700" : "#374151"}
+                  stroke={node.isUsed && node2.isUsed ? exoYellow() : "#374151"}
                   stroke-width="1"
                   stroke-dasharray={node.isUsed && node2.isUsed ? "4,2" : "2,4"}
                   opacity={node.isUsed && node2.isUsed ? 0.4 : 0.15}
@@ -849,7 +868,7 @@
                     height={node.iconSize * 0.65}
                     rx="2"
                     fill="none"
-                    stroke={node.isUsed ? "#FFD700" : "#4B5563"}
+                    stroke={node.isUsed ? exoYellow() : "#4B5563"}
                     stroke-width="1.5"
                   />
                   <!-- Screen area (memory fill container) -->
@@ -878,7 +897,7 @@
                         node.modelFillHeight}
                       width={node.iconSize - 8}
                       height={node.modelFillHeight}
-                      fill="#FFD700"
+                      fill={exoYellow()}
                       filter="url(#memGlow-{filterId})"
                       class="animate-pulse-slow"
                     />
@@ -890,7 +909,7 @@
                       0.68} L {node.iconSize - 2} {node.iconSize *
                       0.78} L 2 {node.iconSize * 0.78} Z"
                     fill="none"
-                    stroke={node.isUsed ? "#FFD700" : "#4B5563"}
+                    stroke={node.isUsed ? exoYellow() : "#4B5563"}
                     stroke-width="1.5"
                   />
                 </g>
@@ -907,7 +926,7 @@
                     height={node.iconSize - 4}
                     rx="4"
                     fill="none"
-                    stroke={node.isUsed ? "#FFD700" : "#4B5563"}
+                    stroke={node.isUsed ? exoYellow() : "#4B5563"}
                     stroke-width="1.5"
                   />
                   <!-- Memory fill background -->
@@ -935,7 +954,7 @@
                       width={node.iconSize - 8}
                       height={(node.iconSize - 8) *
                         ((node.newPercent - node.currentPercent) / 100)}
-                      fill="#FFD700"
+                      fill={exoYellow()}
                       filter="url(#memGlow-{filterId})"
                       class="animate-pulse-slow"
                     />
@@ -954,7 +973,7 @@
                     height={node.iconSize * 0.4}
                     rx="3"
                     fill="none"
-                    stroke={node.isUsed ? "#FFD700" : "#4B5563"}
+                    stroke={node.isUsed ? exoYellow() : "#4B5563"}
                     stroke-width="1.5"
                   />
                   <!-- Memory fill background -->
@@ -984,7 +1003,7 @@
                       height={node.iconSize *
                         0.36 *
                         ((node.newPercent - node.currentPercent) / 100)}
-                      fill="#FFD700"
+                      fill={exoYellow()}
                       filter="url(#memGlow-{filterId})"
                       class="animate-pulse-slow"
                     />
@@ -1003,8 +1022,8 @@
                       0.75} {node.iconSize /
                       2},{node.iconSize} 0,{node.iconSize *
                       0.75} 0,{node.iconSize * 0.25}"
-                    fill={node.isUsed ? "rgba(255,215,0,0.1)" : "#0a0a0a"}
-                    stroke={node.isUsed ? "#FFD700" : "#4B5563"}
+                    fill={node.isUsed ? exoYellow(0.1) : "#0a0a0a"}
+                    stroke={node.isUsed ? exoYellow() : "#4B5563"}
                     stroke-width="1.5"
                   />
                 </g>
@@ -1019,7 +1038,7 @@
                 fill={node.isUsed
                   ? node.newPercent > 90
                     ? "#f87171"
-                    : "#FFD700"
+                    : exoYellow()
                   : "#4B5563"}
               >
                 {node.newPercent.toFixed(0)}%
@@ -1030,7 +1049,15 @@
       </div>
     {/if}
 
-    <!-- Launch Button -->
+    {#if existingInstance && canFit && !isLaunching}
+      <p class="text-xs font-mono text-exo-light-gray/70 mb-2">
+        {existingInstance === "running"
+          ? "This model is already running."
+          : "This model is already starting."}
+      </p>
+    {/if}
+
+    <!-- Start Button -->
     <button
       onclick={onLaunch}
       disabled={isLaunching || !canFit}
@@ -1046,12 +1073,14 @@
           <span
             class="w-2 h-2 border border-exo-yellow border-t-transparent rounded-full animate-spin"
           ></span>
-          LAUNCHING...
+          Starting…
         </span>
       {:else if !canFit}
         INSUFFICIENT MEMORY
+      {:else if existingInstance}
+        ▸ Start another copy
       {:else}
-        ▸ LAUNCH
+        ▸ Start
       {/if}
     </button>
   </div>

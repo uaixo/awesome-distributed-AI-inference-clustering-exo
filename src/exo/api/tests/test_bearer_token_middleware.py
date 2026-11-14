@@ -10,11 +10,39 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.testclient import TestClient
 
-from exo.api.auth import BearerTokenMiddleware
+from exo.api.auth import CLUSTER_PATHS, BearerTokenMiddleware
+from exo.api.cluster_routes import SERVING_PATH, ClusterRoutes
 from exo.api.main import API
+from exo.api.serving_client import ServingClient
+from exo.routing.tests.fake_membership import FakeMembership
+from exo.shared.types.common import NodeId
+from exo.shared.types.state import State
+from exo.worker.serving import SERVE_PATH
 
 KEY = "k" * 40
 ASSET_NAMES = frozenset({"_app", "index.html", "favicon.ico", "exo-logo.png"})
+NODE_ID = NodeId("test-node")
+LOOPBACK = ("127.0.0.1", 50000)
+"""An address the cluster's own routes answer: this machine."""
+STRANGER = ("203.0.113.9", 50000)
+"""An address of no node in the cluster."""
+
+
+def api_with_routes(app: FastAPI) -> API:
+    """An API holding only what `_setup_routes` reads, so the real route table is built."""
+    api = object.__new__(API)
+    api.app = app
+    api.node_id = NODE_ID
+    api.state = State()
+    api._serving_host = None  # pyright: ignore[reportPrivateUsage]
+    api._serving = ServingClient(  # pyright: ignore[reportPrivateUsage]
+        NODE_ID,
+        api_port=52415,
+        host=None,
+        state=lambda: api.state,
+        reachability=FakeMembership(NODE_ID),
+    )
+    return api
 
 
 @pytest.fixture
@@ -31,10 +59,7 @@ def dashboard(tmp_path: Path) -> Path:
 def client(dashboard: Path) -> TestClient:
     """The real route table and middleware over a stand-in dashboard mount."""
     app = FastAPI()
-    api = object.__new__(API)
-    api.app = app
-    api.node_id = "test-node"  # pyright: ignore[reportAttributeAccessIssue]
-    api._setup_routes()  # pyright: ignore[reportPrivateUsage]
+    api_with_routes(app)._setup_routes()  # pyright: ignore[reportPrivateUsage]
     app.add_middleware(
         BearerTokenMiddleware,
         key=KEY,
@@ -60,6 +85,58 @@ def test_dashboard_assets_are_served_without_a_key(
 def test_node_id_is_public(client: TestClient) -> None:
     """Peers probe /node_id before they could hold this node's key."""
     assert client.get("/node_id").status_code == HTTPStatus.OK
+
+
+def cluster_client(address: tuple[str, int]) -> TestClient:
+    """The real route table and middleware, called from `address` with no key."""
+    app = FastAPI()
+    api_with_routes(app)._setup_routes()  # pyright: ignore[reportPrivateUsage]
+    app.add_middleware(
+        BearerTokenMiddleware,
+        key=KEY,
+        api_routes=tuple(app.routes),
+        asset_names=ASSET_NAMES,
+    )
+    return TestClient(app, raise_server_exceptions=False, client=address)
+
+
+def test_a_node_of_the_cluster_reaches_its_routes_without_a_key() -> None:
+    """A node holds its own key, not its peers', so a key here would refuse every
+    request one node serves for another."""
+    member = cluster_client(LOOPBACK)
+
+    assert member.get(SERVING_PATH).status_code == HTTPStatus.OK
+    # Past the middleware and the member check, to the handler: this node runs no models
+    assert member.post(SERVE_PATH, content=b"{}").status_code == HTTPStatus.NOT_FOUND
+
+
+def test_the_cluster_routes_still_refuse_anyone_outside_the_cluster() -> None:
+    """Their own check on the caller's address is what guards them, not the key."""
+    stranger = cluster_client(STRANGER)
+
+    for path in CLUSTER_PATHS:
+        assert stranger.get(path).status_code in (
+            HTTPStatus.FORBIDDEN,
+            HTTPStatus.METHOD_NOT_ALLOWED,
+        )
+    assert stranger.get(SERVING_PATH).status_code == HTTPStatus.FORBIDDEN
+    assert stranger.post(SERVE_PATH, content=b"{}").status_code == HTTPStatus.FORBIDDEN
+
+
+def test_the_key_is_still_required_from_a_node_of_the_cluster_elsewhere() -> None:
+    """Being a member opens the cluster's routes only, never the API."""
+    assert cluster_client(LOOPBACK).get("/state").status_code == HTTPStatus.UNAUTHORIZED
+
+
+def test_every_route_the_cluster_registers_is_reachable_without_a_key() -> None:
+    """A route added to `ClusterRoutes` and not to `CLUSTER_PATHS` would answer 401 to
+    every other node, which is requests failing across the cluster, not a visible error."""
+    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+    ClusterRoutes(state=State, host=None).add_to(app)
+
+    registered = {cast(str, getattr(route, "path", "")) for route in app.routes}
+
+    assert registered == CLUSTER_PATHS
 
 
 def test_an_api_route_is_refused_without_a_key(client: TestClient) -> None:
@@ -202,9 +279,7 @@ def test_cors_is_registered_outside_authentication(
     """Starlette applies the last-added middleware outermost, so _setup_cors must
     run after _setup_auth; the reverse order strips the CORS header off every 401."""
     app = FastAPI()
-    api = object.__new__(API)
-    api.app = app
-    api.node_id = "test-node"  # pyright: ignore[reportAttributeAccessIssue]
+    api = api_with_routes(app)
     monkeypatch.setattr("exo.api.main.resolve_api_key", lambda: KEY)
     monkeypatch.setattr("exo.api.main.dashboard_dir", lambda: dashboard)
     monkeypatch.setattr("exo.api.main.EXO_API_ALLOWED_ORIGINS", ("https://ui.example",))

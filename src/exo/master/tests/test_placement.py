@@ -1,10 +1,12 @@
 from collections.abc import Mapping
+from datetime import datetime, timezone
 
 import pytest
 
 from exo.master.placement import (
-    get_transition_events,
+    memory_once_loaded,
     place_instance,
+    removal_events,
     search_placement_cycles,
 )
 from exo.master.tests.conftest import (
@@ -16,25 +18,18 @@ from exo.master.tests.conftest import (
 from exo.shared.models.model_cards import ModelCard, ModelId, ModelTask
 from exo.shared.topology import Topology
 from exo.shared.types.backends import Backend
-from exo.shared.types.commands import PlaceInstance
-from exo.shared.types.common import CommandId, NodeId
+from exo.shared.types.common import NodeId
 from exo.shared.types.events import (
-    InstanceCreated,
     InstanceDeleted,
-    TaskStatusUpdated,
 )
 from exo.shared.types.memory import Memory
 from exo.shared.types.multiaddr import Multiaddr
+from exo.shared.types.placement import PlacementRequest
 from exo.shared.types.profiling import (
+    MemoryUsage,
     NetworkInterfaceInfo,
     NodeNetworkInfo,
     NodeRdmaCtlStatus,
-)
-from exo.shared.types.tasks import TaskId, TaskStatus, TextGeneration
-from exo.shared.types.text_generation import (
-    InputMessage,
-    InputMessageContent,
-    TextGenerationTaskParams,
 )
 from exo.shared.types.topology import Connection, SocketConnection
 from exo.shared.types.worker.downloads import (
@@ -50,8 +45,23 @@ from exo.shared.types.worker.instances import (
     MlxJacclInstance,
     MlxRingInstance,
 )
-from exo.shared.types.worker.runners import ShardAssignments
+from exo.shared.types.worker.runners import (
+    RunnerConnecting,
+    RunnerFailed,
+    RunnerId,
+    RunnerIdle,
+    RunnerLoaded,
+    RunnerLoading,
+    RunnerReady,
+    RunnerRunning,
+    RunnerShuttingDown,
+    RunnerStatus,
+    RunnerWarmingUp,
+    ShardAssignments,
+)
 from exo.shared.types.worker.shards import PipelineShardMetadata, Sharding
+
+AT = datetime(2026, 11, 3, 12, 0, tzinfo=timezone.utc)
 
 
 @pytest.fixture
@@ -85,9 +95,8 @@ def _metal_only(
     return {node_id: [Backend.MlxMetal] for node_id in node_memory}
 
 
-def place_instance_command(model_card: ModelCard) -> PlaceInstance:
-    return PlaceInstance(
-        command_id=CommandId(),
+def place_instance_command(model_card: ModelCard) -> PlacementRequest:
+    return PlacementRequest(
         model_card=model_card,
         sharding=Sharding.Pipeline,
         instance_meta=InstanceMeta.MlxRing,
@@ -290,7 +299,7 @@ def test_get_instance_placements_one_node_not_fit() -> None:
         ),
     )
 
-    with pytest.raises(ValueError, match="No cycles found with sufficient memory"):
+    with pytest.raises(ValueError) as error:
         place_instance(
             cic,
             topology,
@@ -300,48 +309,154 @@ def test_get_instance_placements_one_node_not_fit() -> None:
             _metal_only(node_memory),
             cycle_search=search_placement_cycles(topology),
         )
+    assert str(error.value) == (
+        "Not enough memory: test-model needs 0.0 GB, but connected nodes can use at most "
+        "0.0 GB between them"
+    )
 
 
-def test_get_transition_events_no_change(instance: Instance):
-    # arrange
+def _connected(*groups: list[NodeId]) -> Topology:
+    """Nodes connected both ways to every other node in their group."""
+    topology = Topology()
+    port = 0
+    for group in groups:
+        for node_id in group:
+            topology.add_node(node_id)
+        for source in group:
+            for sink in group:
+                if source != sink:
+                    port += 1
+                    topology.add_connection(
+                        Connection(
+                            source=source,
+                            sink=sink,
+                            edge=create_socket_connection(port),
+                        )
+                    )
+    return topology
+
+
+def _small_model() -> ModelCard:
+    return ModelCard(
+        model_id=ModelId("test-model"),
+        storage_size=Memory.from_kb(1000),
+        n_layers=10,
+        hidden_size=1000,
+        supports_tensor=True,
+        tasks=[ModelTask.TextGeneration],
+        backends=[Backend.MlxMetal],
+    )
+
+
+def test_placement_says_when_too_few_nodes_are_connected() -> None:
+    a, b, c = NodeId(), NodeId(), NodeId()
+    topology = _connected([a, b], [c])
+    node_memory = {n: create_node_memory(10**9) for n in (a, b, c)}
+    node_network = {n: create_node_network() for n in (a, b, c)}
+    command = place_instance_command(_small_model()).model_copy(update={"min_nodes": 3})
+
+    with pytest.raises(ValueError) as error:
+        place_instance(
+            command,
+            topology,
+            {},
+            node_memory,
+            node_network,
+            _metal_only(node_memory),
+        )
+
+    assert str(error.value) == (
+        "Needs 3 connected nodes, but at most 2 are connected to each other"
+    )
+
+
+def test_placement_says_when_there_are_no_nodes() -> None:
+    with pytest.raises(ValueError) as error:
+        place_instance(
+            place_instance_command(_small_model()), Topology(), {}, {}, {}, {}
+        )
+
+    assert str(error.value) == "No nodes are available"
+
+
+def test_placement_says_when_the_chosen_nodes_are_not_connected() -> None:
+    a, b, c = NodeId(), NodeId(), NodeId()
+    topology = _connected([a, b], [c])
+    node_memory = {n: create_node_memory(10**9) for n in (a, b, c)}
+    node_network = {n: create_node_network() for n in (a, b, c)}
+
+    with pytest.raises(ValueError) as error:
+        place_instance(
+            place_instance_command(_small_model()),
+            topology,
+            {},
+            node_memory,
+            node_network,
+            _metal_only(node_memory),
+            required_nodes={a, c},
+        )
+
+    assert str(error.value) == ("The chosen nodes aren't all connected to each other")
+
+
+def test_placement_says_how_much_memory_is_free() -> None:
+    a, b = NodeId(), NodeId()
+    topology = _connected([a, b])
+    node_memory = {
+        a: create_node_memory(300 * 1024**2),
+        b: create_node_memory(500 * 1024**2),
+    }
+    node_network = {n: create_node_network() for n in (a, b)}
+    model = _small_model().model_copy(
+        update={"storage_size": Memory.from_bytes(2 * 1024**3)}
+    )
+
+    with pytest.raises(ValueError) as error:
+        place_instance(
+            place_instance_command(model),
+            topology,
+            {},
+            node_memory,
+            node_network,
+            _metal_only(node_memory),
+        )
+
+    assert str(error.value) == (
+        "Not enough memory: test-model needs 2.0 GB, but connected nodes can use at most "
+        "0.8 GB between them"
+    )
+
+
+def test_placement_says_when_nodes_have_not_reported_their_memory() -> None:
+    a, b = NodeId(), NodeId()
+    topology = _connected([a, b])
+
+    with pytest.raises(ValueError) as error:
+        place_instance(
+            place_instance_command(_small_model()),
+            topology,
+            {},
+            {},
+            {},
+            {a: [Backend.MlxMetal], b: [Backend.MlxMetal]},
+        )
+
+    assert str(error.value) == "Waiting for the nodes to report their memory"
+
+
+def test_removal_events_remove_the_instance_with_its_reason():
     instance_id = InstanceId()
-    current_instances = {instance_id: instance}
-    target_instances = {instance_id: instance}
 
-    # act
-    events = get_transition_events(current_instances, target_instances, {})
+    events = removal_events(instance_id, "StartFailed", AT)
 
-    # assert
-    assert len(events) == 0
-
-
-def test_get_transition_events_create_instance(instance: Instance):
-    # arrange
-    instance_id = InstanceId()
-    current_instances: dict[InstanceId, Instance] = {}
-    target_instances: dict[InstanceId, Instance] = {instance_id: instance}
-
-    # act
-    events = get_transition_events(current_instances, target_instances, {})
-
-    # assert
-    assert len(events) == 1
-    assert isinstance(events[0], InstanceCreated)
-
-
-def test_get_transition_events_delete_instance(instance: Instance):
-    # arrange
-    instance_id = InstanceId()
-    current_instances: dict[InstanceId, Instance] = {instance_id: instance}
-    target_instances: dict[InstanceId, Instance] = {}
-
-    # act
-    events = get_transition_events(current_instances, target_instances, {})
-
-    # assert
-    assert len(events) == 1
-    assert isinstance(events[0], InstanceDeleted)
-    assert events[0].instance_id == instance_id
+    assert events == [
+        InstanceDeleted(
+            instance_id=instance_id,
+            reason="StartFailed",
+            at=AT.isoformat(),
+            event_id=events[0].event_id,
+        )
+    ]
 
 
 def test_placement_selects_leaf_nodes(
@@ -489,10 +604,9 @@ def test_tensor_rdma_backend_connectivity_matrix(
     topology.add_connection(Connection(source=node_b, sink=node_a, edge=ethernet_conn))
     topology.add_connection(Connection(source=node_c, sink=node_b, edge=ethernet_conn))
 
-    cic = PlaceInstance(
+    cic = PlacementRequest(
         sharding=Sharding.Tensor,
         instance_meta=InstanceMeta.MlxJaccl,
-        command_id=CommandId(),
         model_card=model_card,
         min_nodes=1,
     )
@@ -621,10 +735,9 @@ def test_place_mlx_jaccl_rejects_when_a_node_has_rdma_ctl_disabled(
         node_b: NodeRdmaCtlStatus(enabled=True),
         node_c: NodeRdmaCtlStatus(enabled=False),
     }
-    cic = PlaceInstance(
+    cic = PlacementRequest(
         sharding=Sharding.Tensor,
         instance_meta=InstanceMeta.MlxJaccl,
-        command_id=CommandId(),
         model_card=model_card,
         min_nodes=3,
     )
@@ -662,10 +775,9 @@ def test_place_mlx_jaccl_rejects_when_node_rdma_ctl_missing(model_card: ModelCar
         node_a: NodeRdmaCtlStatus(enabled=True),
         node_b: NodeRdmaCtlStatus(enabled=True),
     }
-    cic = PlaceInstance(
+    cic = PlacementRequest(
         sharding=Sharding.Tensor,
         instance_meta=InstanceMeta.MlxJaccl,
-        command_id=CommandId(),
         model_card=model_card,
         min_nodes=3,
     )
@@ -682,120 +794,6 @@ def test_place_mlx_jaccl_rejects_when_node_rdma_ctl_missing(model_card: ModelCar
             node_rdma_ctl=node_rdma_ctl,
             cycle_search=search_placement_cycles(topology),
         )
-
-
-def _make_task(
-    instance_id: InstanceId,
-    status: TaskStatus = TaskStatus.Running,
-) -> TextGeneration:
-    return TextGeneration(
-        task_id=TaskId(),
-        task_status=status,
-        instance_id=instance_id,
-        command_id=CommandId(),
-        task_params=TextGenerationTaskParams(
-            model=ModelId("test-model"),
-            input=[InputMessage(role="user", content=InputMessageContent("hello"))],
-        ),
-    )
-
-
-def test_get_transition_events_delete_instance_cancels_running_tasks(
-    instance: Instance,
-):
-    # arrange
-    instance_id = InstanceId()
-    current_instances: dict[InstanceId, Instance] = {instance_id: instance}
-    target_instances: dict[InstanceId, Instance] = {}
-    task = _make_task(instance_id, TaskStatus.Running)
-    tasks = {task.task_id: task}
-
-    # act
-    events = get_transition_events(current_instances, target_instances, tasks)
-
-    # assert – cancellation event should come before the deletion event
-    assert len(events) == 2
-    assert isinstance(events[0], TaskStatusUpdated)
-    assert events[0].task_id == task.task_id
-    assert events[0].task_status == TaskStatus.Cancelled
-    assert isinstance(events[1], InstanceDeleted)
-    assert events[1].instance_id == instance_id
-
-
-def test_get_transition_events_delete_instance_cancels_pending_tasks(
-    instance: Instance,
-):
-    # arrange
-    instance_id = InstanceId()
-    current_instances: dict[InstanceId, Instance] = {instance_id: instance}
-    target_instances: dict[InstanceId, Instance] = {}
-    task = _make_task(instance_id, TaskStatus.Pending)
-    tasks = {task.task_id: task}
-
-    # act
-    events = get_transition_events(current_instances, target_instances, tasks)
-
-    # assert
-    assert len(events) == 2
-    assert isinstance(events[0], TaskStatusUpdated)
-    assert events[0].task_id == task.task_id
-    assert events[0].task_status == TaskStatus.Cancelled
-    assert isinstance(events[1], InstanceDeleted)
-
-
-def test_get_transition_events_delete_instance_ignores_completed_tasks(
-    instance: Instance,
-):
-    # arrange
-    instance_id = InstanceId()
-    current_instances: dict[InstanceId, Instance] = {instance_id: instance}
-    target_instances: dict[InstanceId, Instance] = {}
-    tasks = {
-        t.task_id: t
-        for t in [
-            _make_task(instance_id, TaskStatus.Complete),
-            _make_task(instance_id, TaskStatus.Failed),
-            _make_task(instance_id, TaskStatus.TimedOut),
-            _make_task(instance_id, TaskStatus.Cancelled),
-        ]
-    }
-
-    # act
-    events = get_transition_events(current_instances, target_instances, tasks)
-
-    # assert – only the InstanceDeleted event, no cancellations
-    assert len(events) == 1
-    assert isinstance(events[0], InstanceDeleted)
-
-
-def test_get_transition_events_delete_instance_cancels_only_matching_tasks(
-    instance: Instance,
-):
-    # arrange
-    instance_id_a = InstanceId()
-    instance_id_b = InstanceId()
-    current_instances: dict[InstanceId, Instance] = {
-        instance_id_a: instance,
-        instance_id_b: instance,
-    }
-    # only delete instance A, keep instance B
-    target_instances: dict[InstanceId, Instance] = {instance_id_b: instance}
-
-    task_a = _make_task(instance_id_a, TaskStatus.Running)
-    task_b = _make_task(instance_id_b, TaskStatus.Running)
-    tasks = {task_a.task_id: task_a, task_b.task_id: task_b}
-
-    # act
-    events = get_transition_events(current_instances, target_instances, tasks)
-
-    # assert – only task_a should be cancelled
-    cancel_events = [e for e in events if isinstance(e, TaskStatusUpdated)]
-    delete_events = [e for e in events if isinstance(e, InstanceDeleted)]
-    assert len(cancel_events) == 1
-    assert cancel_events[0].task_id == task_a.task_id
-    assert cancel_events[0].task_status == TaskStatus.Cancelled
-    assert len(delete_events) == 1
-    assert delete_events[0].instance_id == instance_id_a
 
 
 def _make_shard_metadata(model_card: ModelCard) -> PipelineShardMetadata:
@@ -1083,10 +1081,9 @@ def test_mlx_jaccl_rejects_cuda_only_cycle(model_card: ModelCard):
     }
     node_backends = {n: [Backend.MlxCuda] for n in (node_a, node_b, node_c)}
 
-    cic = PlaceInstance(
+    cic = PlacementRequest(
         sharding=Sharding.Tensor,
         instance_meta=InstanceMeta.MlxJaccl,
-        command_id=CommandId(),
         model_card=model_card.model_copy(
             update={
                 "backends": [Backend.MlxMetal, Backend.MlxCuda],
@@ -1108,3 +1105,220 @@ def test_mlx_jaccl_rejects_cuda_only_cycle(model_card: ModelCard):
             node_rdma_ctl=node_rdma_ctl,
             cycle_search=search_placement_cycles(topology),
         )
+
+
+# Memory taken by instances that are still loading
+
+
+GB = 1024**3
+
+
+def _two_connected_nodes(
+    memory_bytes: int,
+) -> tuple[
+    Topology,
+    dict[NodeId, MemoryUsage],
+    dict[NodeId, NodeNetworkInfo],
+    list[NodeId],
+]:
+    a, b = NodeId(), NodeId()
+    topology = Topology()
+    topology.add_node(a)
+    topology.add_node(b)
+    topology.add_connection(
+        Connection(source=a, sink=b, edge=create_socket_connection(1))
+    )
+    topology.add_connection(
+        Connection(source=b, sink=a, edge=create_socket_connection(2))
+    )
+    node_memory = {n: create_node_memory(memory_bytes) for n in (a, b)}
+    node_network = {n: create_node_network() for n in (a, b)}
+    return topology, node_memory, node_network, [a, b]
+
+
+def _model_of(name: str, size_bytes: int) -> ModelCard:
+    return ModelCard(
+        model_id=ModelId(name),
+        storage_size=Memory.from_bytes(size_bytes),
+        n_layers=10,
+        hidden_size=1000,
+        supports_tensor=True,
+        tasks=[ModelTask.TextGeneration],
+        backends=[Backend.MlxMetal],
+    )
+
+
+def _place(
+    model: ModelCard,
+    topology: Topology,
+    instances: Mapping[InstanceId, Instance],
+    node_memory: Mapping[NodeId, MemoryUsage],
+    node_network: Mapping[NodeId, NodeNetworkInfo],
+    runners: Mapping[RunnerId, RunnerStatus],
+    sharding: Sharding = Sharding.Pipeline,
+    min_nodes: int = 1,
+) -> tuple[dict[InstanceId, Instance], Instance]:
+    placement = place_instance(
+        place_instance_command(model).model_copy(
+            update={"sharding": sharding, "min_nodes": min_nodes}
+        ),
+        topology,
+        instances,
+        node_memory,
+        node_network,
+        _metal_only(node_memory),
+        runners=runners,
+    )
+    (new,) = [i for i in placement.values() if i.instance_id not in instances]
+    return placement, new
+
+
+def _nodes_of(instance: Instance) -> set[NodeId]:
+    return set(instance.shard_assignments.node_to_runner)
+
+
+def test_a_second_model_goes_to_the_other_node_while_the_first_loads() -> None:
+    topology, node_memory, node_network, _ = _two_connected_nodes(10 * GB)
+
+    instances, first = _place(
+        _model_of("model-a", 6 * GB), topology, {}, node_memory, node_network, {}
+    )
+    # The first one's runner hasn't loaded, so its node still reports 10 GB free
+    _, second = _place(
+        _model_of("model-b", 6 * GB), topology, instances, node_memory, node_network, {}
+    )
+
+    assert _nodes_of(first).isdisjoint(_nodes_of(second))
+
+
+def test_a_model_that_only_fits_in_memory_still_loading_is_refused() -> None:
+    topology = Topology()
+    node = NodeId()
+    topology.add_node(node)
+    node_memory = {node: create_node_memory(10 * GB)}
+    node_network = {node: create_node_network()}
+    instances, _ = _place(
+        _model_of("model-a", 6 * GB), topology, {}, node_memory, node_network, {}
+    )
+
+    with pytest.raises(ValueError, match="Not enough memory|sufficient memory"):
+        _place(
+            _model_of("model-b", 6 * GB),
+            topology,
+            instances,
+            node_memory,
+            node_network,
+            {},
+        )
+
+
+def test_a_loaded_runner_is_not_counted_twice() -> None:
+    topology = Topology()
+    node = NodeId()
+    topology.add_node(node)
+    node_network = {node: create_node_network()}
+    instances, first = _place(
+        _model_of("model-a", 6 * GB),
+        topology,
+        {},
+        {node: create_node_memory(10 * GB)},
+        node_network,
+        {},
+    )
+    (runner_id,) = first.shard_assignments.node_to_runner.values()
+    # Loaded: the node's report already shows the 6 GB as used
+    loaded_memory = {node: create_node_memory(4 * GB)}
+
+    _, second = _place(
+        _model_of("model-b", 3 * GB),
+        topology,
+        instances,
+        loaded_memory,
+        node_network,
+        {runner_id: RunnerReady()},
+    )
+
+    assert _nodes_of(second) == {node}
+
+
+def test_each_runner_holds_its_share_of_the_model_until_loaded() -> None:
+    topology, node_memory, node_network, nodes = _two_connected_nodes(100 * GB)
+    _, tensor = _place(
+        _model_of("model-a", 8 * GB),
+        topology,
+        {},
+        node_memory,
+        node_network,
+        {},
+        sharding=Sharding.Tensor,
+        min_nodes=2,
+    )
+    _, pipeline = _place(
+        _model_of("model-b", 10 * GB),
+        topology,
+        {},
+        node_memory,
+        node_network,
+        {},
+        min_nodes=2,
+    )
+
+    def free_gb(
+        instance: Instance, runners: Mapping[RunnerId, RunnerStatus]
+    ) -> list[float]:
+        free = memory_once_loaded(
+            node_memory, {instance.instance_id: instance}, runners
+        )
+        return [round(free[n].ram_available.in_bytes / GB, 2) for n in nodes]
+
+    # Tensor: each node holds half of the 8 GB
+    assert free_gb(tensor, {}) == [96.0, 96.0]
+    # Pipeline: each node holds its layers' share of the 10 GB
+    layers = {
+        node: (shard.end_layer - shard.start_layer)
+        for node, runner in pipeline.shard_assignments.node_to_runner.items()
+        for shard in [pipeline.shard_assignments.runner_to_shard[runner]]
+    }
+    assert free_gb(pipeline, {}) == [100 - layers[n] for n in nodes]
+
+
+def test_which_runners_hold_memory_they_have_not_taken_yet() -> None:
+    topology = Topology()
+    node = NodeId()
+    topology.add_node(node)
+    node_memory = {node: create_node_memory(10 * GB)}
+    _, instance = _place(
+        _model_of("model-a", 6 * GB),
+        topology,
+        {},
+        node_memory,
+        {node: create_node_network()},
+        {},
+    )
+    (runner_id,) = instance.shard_assignments.node_to_runner.values()
+
+    def free_gb(status: RunnerStatus | None) -> float:
+        runners = {} if status is None else {runner_id: status}
+        free = memory_once_loaded(
+            node_memory, {instance.instance_id: instance}, runners
+        )
+        return free[node].ram_available.in_bytes / GB
+
+    # Not started, starting, loading, or failed and about to load again: still to take
+    for status in (
+        None,
+        RunnerIdle(),
+        RunnerConnecting(),
+        RunnerLoading(),
+        RunnerFailed(error_message="oom", diagnostics=[]),
+    ):
+        assert free_gb(status) == 4.0, status
+    # Loaded (in the node's report already), or going away
+    for status in (
+        RunnerLoaded(),
+        RunnerWarmingUp(),
+        RunnerReady(),
+        RunnerRunning(),
+        RunnerShuttingDown(),
+    ):
+        assert free_gb(status) == 10.0, status
