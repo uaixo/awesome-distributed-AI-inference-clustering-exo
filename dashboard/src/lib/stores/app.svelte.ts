@@ -7,7 +7,30 @@
  * - UI state for the topology/chat transition
  */
 
+import type { RawDeployment } from "$lib/utils/deployments";
 import { browser } from "$app/environment";
+import {
+  extractApiErrorMessage,
+  readApiErrorMessage,
+} from "$lib/utils/api_errors";
+import { describeStreamError, type StreamKind } from "$lib/utils/stream_errors";
+import { DeviceSilenceTracker } from "$lib/utils/instance_health";
+import {
+  DownloadActivityTracker,
+  downloadKey,
+  type DownloadActivity,
+} from "$lib/utils/download_activity";
+import {
+  extractModelIdFromDownload,
+  getDownloadTag,
+} from "$lib/utils/downloads";
+import {
+  TOMBSTONE_TTL_MS,
+  mergeConversations,
+  mergeTombstones,
+  sameConversations,
+  type Tombstones,
+} from "$lib/utils/conversation_sync";
 
 import { apiFetch } from "$lib/api";
 import { apiKeyStore } from "$lib/stores/apiKey.svelte";
@@ -70,6 +93,8 @@ export interface TopologyData {
 }
 
 export interface Instance {
+  /** The deployment it runs: what the user launched, which exo keeps running */
+  deploymentId?: string;
   shardAssignments?: {
     modelId?: string;
     runnerToShard?: Record<string, unknown>;
@@ -149,7 +174,12 @@ export interface DownloadProgress {
   totalBytes: number;
   downloadedBytes: number;
   speed: number;
+  // 0 when not known
   etaMs: number;
+  // No bytes for a while
+  stalled?: boolean;
+  // What /state tells about it, e.g. "Stalled: no data for 45s"
+  stalledText?: string;
   percentage: number;
   completedFiles: number;
   totalFiles: number;
@@ -233,7 +263,11 @@ interface RawStateResponse {
   >;
   runners?: Record<string, unknown>;
   instanceLinks?: Record<string, RawInstanceLink>;
+  // The models users launched, which exo keeps running (utils/deployments.ts)
+  deployments?: Record<string, RawDeployment>;
   downloads?: Record<string, unknown[]>;
+  // When each node last reported, stamped by the master's clock
+  lastSeen?: Record<string, string>;
   // New granular node state fields
   nodeIdentities?: Record<string, RawNodeIdentity>;
   nodeMemory?: Record<string, RawMemoryUsage>;
@@ -307,6 +341,9 @@ export interface Message {
   requestType?: "chat" | "image-generation" | "image-editing";
   sourceImageDataUrl?: string; // For image editing regeneration
   tokens?: TokenData[];
+  // Why the reply stopped early, in one short sentence. Shown under whatever
+  // was streamed before it, which is kept.
+  error?: string;
 }
 
 export interface Conversation {
@@ -322,6 +359,30 @@ export interface Conversation {
 }
 
 const STORAGE_KEY = "exo-conversations";
+// Conversations deleted in any tab, one key per conversation (its value: when),
+// so merging another tab's copy doesn't bring them back (see
+// conversation_sync.ts). One key each means a tab only ever adds its own
+// deletions: it can't overwrite another tab's with a list it read earlier.
+const DELETED_KEY_PREFIX = "exo-conversation-deleted:";
+
+// A stored conversation with every field set. Missing times count as
+// fallbackTime: now when first loaded, 0 (older than anything) when merging.
+function normalizeConversation(
+  conversation: Partial<Conversation>,
+  fallbackTime: number,
+): Conversation {
+  return {
+    id: conversation.id ?? generateUUID(),
+    name: conversation.name ?? "Chat",
+    messages: conversation.messages ?? [],
+    createdAt: conversation.createdAt ?? fallbackTime,
+    updatedAt: conversation.updatedAt ?? fallbackTime,
+    modelId: conversation.modelId ?? null,
+    sharding: conversation.sharding ?? null,
+    instanceType: conversation.instanceType ?? null,
+    enableThinking: conversation.enableThinking ?? null,
+  };
+}
 const IMAGE_PARAMS_STORAGE_KEY = "exo-image-generation-params";
 
 // Image generation params interface matching backend API
@@ -527,6 +588,38 @@ function extractIpFromMultiaddr(ma?: string): string | undefined {
   return undefined;
 }
 
+// The text an image request shows while it runs, replaced by the result
+function isProgressPlaceholder(content: string): boolean {
+  return (
+    content === "Generating image..." ||
+    content === "Editing image..." ||
+    content.startsWith("Generating...") ||
+    content.startsWith("Editing...")
+  );
+}
+
+// The downloaded bytes of every download in progress, by downloadKey
+function ongoingDownloadBytes(
+  downloads: Record<string, unknown[]>,
+): Record<string, number> {
+  const result: Record<string, number> = {};
+  for (const [nodeId, entries] of Object.entries(downloads)) {
+    if (!Array.isArray(entries)) continue;
+    for (const entry of entries) {
+      const tagged = getDownloadTag(entry);
+      if (!tagged || tagged[0] !== "DownloadOngoing") continue;
+      const modelId = extractModelIdFromDownload(tagged[1]);
+      const progress = (tagged[1].downloadProgress ??
+        tagged[1].download_progress) as
+        | { downloaded?: { inBytes?: number } }
+        | undefined;
+      if (!modelId) continue;
+      result[downloadKey(nodeId, modelId)] = progress?.downloaded?.inBytes ?? 0;
+    }
+  }
+  return result;
+}
+
 class AppStore {
   // Conversation state
   conversations = $state<Conversation[]>([]);
@@ -546,14 +639,25 @@ class AppStore {
 
   // Abort controller for stopping generation
   private currentAbortController: AbortController | null = null;
+  // The conversation a reply is streaming into, while it streams
+  private streamingConversationId: string | null = null;
+
+  /** The message whose reply just stopped with an error, while its
+   * conversation stays open: screen readers announce only that one, not the
+   * errors saved in a conversation that is opened later */
+  freshErrorMessageId = $state<string | null>(null);
 
   // Topology state
   topologyData = $state<TopologyData | null>(null);
   instances = $state<Record<string, unknown>>({});
   runners = $state<Record<string, unknown>>({});
   instanceLinks = $state<Record<string, RawInstanceLink>>({});
+  deployments = $state<Record<string, RawDeployment>>({});
   featureFlags = $state<Record<string, boolean>>({});
   downloads = $state<Record<string, unknown[]>>({});
+  /** Whether each download in progress is moving, by downloadKey */
+  downloadActivity = $state<Record<string, DownloadActivity>>({});
+  private downloadTracker = new DownloadActivityTracker();
   nodeDisk = $state<
     Record<
       string,
@@ -565,6 +669,9 @@ class AppStore {
   isLoadingPreviews = $state(false);
   previewNodeFilter = $state<Set<string>>(new Set());
   lastUpdate = $state<number | null>(null);
+  /** When each node was last heard from, on this browser's clock (ms) */
+  nodeHeardAt = $state<Record<string, number>>({});
+  private deviceSilence = new DeviceSilenceTracker();
   nodeIdentities = $state<Record<string, RawNodeIdentity>>({});
   thunderboltBridgeCycles = $state<string[][]>([]);
   nodeThunderbolt = $state<
@@ -613,12 +720,26 @@ class AppStore {
   private fetchInterval: ReturnType<typeof setInterval> | null = null;
   private previewsInterval: ReturnType<typeof setInterval> | null = null;
   private lastConversationPersistTs = 0;
+  // Conversations deleted in any tab, kept so merges don't bring them back
+  private deletedConversations: Tombstones = {};
+  // What this tab last wrote: unchanged storage needs no merge
+  private lastWrittenConversations: string | null = null;
   private previousNodeIds: Set<string> = new Set();
 
   constructor() {
     if (browser) {
       this.startPolling();
       this.loadConversationsFromStorage();
+      // Another tab saved its conversations: take in what it changed
+      window.addEventListener("storage", (event) => {
+        if (
+          event.key === null ||
+          event.key === STORAGE_KEY ||
+          event.key.startsWith(DELETED_KEY_PREFIX)
+        ) {
+          this.syncConversationsFromStorage();
+        }
+      });
       this.loadDebugModeFromStorage();
       this.loadTopologyOnlyModeFromStorage();
       this.loadChatSidebarVisibleFromStorage();
@@ -631,46 +752,177 @@ class AppStore {
    */
   private loadConversationsFromStorage() {
     try {
+      this.deletedConversations = this.readDeletedConversations();
       const stored = localStorage.getItem(STORAGE_KEY);
       if (stored) {
         const parsed = JSON.parse(stored) as Array<Partial<Conversation>>;
-        this.conversations = parsed.map((conversation) => ({
-          id: conversation.id ?? generateUUID(),
-          name: conversation.name ?? "Chat",
-          messages: conversation.messages ?? [],
-          createdAt: conversation.createdAt ?? Date.now(),
-          updatedAt: conversation.updatedAt ?? Date.now(),
-          modelId: conversation.modelId ?? null,
-          sharding: conversation.sharding ?? null,
-          instanceType: conversation.instanceType ?? null,
-          enableThinking: conversation.enableThinking ?? null,
-        }));
+        const now = Date.now();
+        this.conversations = parsed
+          .map((conversation) => normalizeConversation(conversation, now))
+          .filter(
+            (conversation) => !(conversation.id in this.deletedConversations),
+          );
+        // Fields filled in here (ids, times) must be stored as they are now,
+        // or each later read would fill them in differently
+        if (
+          parsed.some(
+            (conversation) =>
+              !conversation.id ||
+              conversation.createdAt === undefined ||
+              conversation.updatedAt === undefined,
+          )
+        ) {
+          this.writeConversations(this.conversations);
+        }
       }
     } catch (error) {
       console.error("Failed to load conversations:", error);
     }
   }
 
+  private readDeletedConversations(): Tombstones {
+    const deleted: Tombstones = {};
+    try {
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (!key?.startsWith(DELETED_KEY_PREFIX)) continue;
+        const deletedAt = Number(localStorage.getItem(key));
+        if (Number.isFinite(deletedAt)) {
+          deleted[key.slice(DELETED_KEY_PREFIX.length)] = deletedAt;
+        }
+      }
+    } catch {
+      // Unreadable: no deletions known from storage
+    }
+    return deleted;
+  }
+
+  // Store this tab's deletions, each under its own key, and forget expired
+  // ones. Nothing here can undo another tab's deletion.
+  private writeDeletedConversations(stored: Tombstones) {
+    for (const [id, deletedAt] of Object.entries(this.deletedConversations)) {
+      if (stored[id] === undefined) {
+        localStorage.setItem(DELETED_KEY_PREFIX + id, String(deletedAt));
+      }
+    }
+    // Only by age: a deletion this tab hasn't read yet must stay
+    const now = Date.now();
+    for (const [id, deletedAt] of Object.entries(stored)) {
+      if (now - deletedAt > TOMBSTONE_TTL_MS) {
+        localStorage.removeItem(DELETED_KEY_PREFIX + id);
+      }
+    }
+  }
+
+  // The conversations other tabs saved, or null when the stored list is the
+  // one this tab last wrote
+  private readOtherTabsConversations(): Conversation[] | null {
+    const stored = localStorage.getItem(STORAGE_KEY);
+    if (!stored || stored === this.lastWrittenConversations) return null;
+    const parsed = JSON.parse(stored) as Array<Partial<Conversation>>;
+    return parsed
+      .filter((conversation) => conversation.id)
+      .map((conversation) => normalizeConversation(conversation, 0));
+  }
+
+  private writeConversations(conversations: Conversation[]) {
+    // Strip tokens from messages before saving to avoid bloating localStorage
+    const stripped = conversations.map((conv) => ({
+      ...conv,
+      messages: conv.messages.map((msg) => {
+        if (msg.tokens) {
+          const { tokens: _, ...rest } = msg;
+          return rest;
+        }
+        return msg;
+      }),
+    }));
+    const serialized = JSON.stringify(stripped);
+    localStorage.setItem(STORAGE_KEY, serialized);
+    this.lastWrittenConversations = serialized;
+  }
+
   /**
-   * Save conversations to localStorage
+   * Merge what other tabs saved into this tab's conversations: by id, the
+   * version updated last wins, and only deleted ones go away. Returns the
+   * merged list.
+   */
+  private mergeOtherTabsConversations(): Conversation[] {
+    const deleted = mergeTombstones(
+      this.deletedConversations,
+      this.readDeletedConversations(),
+      Date.now(),
+    );
+    this.deletedConversations = deleted;
+    const merged = mergeConversations(
+      this.conversations,
+      this.readOtherTabsConversations() ?? [],
+      deleted,
+    );
+    if (!sameConversations(this.conversations, merged)) {
+      this.applyMergedConversations(merged);
+    }
+    return merged;
+  }
+
+  private applyMergedConversations(merged: Conversation[]) {
+    // Deleted in another tab while this one streams into it: stop, so this
+    // tab neither keeps adding to it nor saves it again
+    if (
+      this.streamingConversationId &&
+      !merged.some((c) => c.id === this.streamingConversationId)
+    ) {
+      this.currentAbortController?.abort();
+    }
+    const active = this.activeConversationId
+      ? merged.find((c) => c.id === this.activeConversationId)
+      : undefined;
+    const activeBefore = this.activeConversationId
+      ? this.conversations.find((c) => c.id === this.activeConversationId)
+      : undefined;
+    this.conversations = merged;
+    if (this.activeConversationId && !active) {
+      // Deleted in another tab
+      this.activeConversationId = null;
+      this.messages = [];
+      this.hasStartedChat = false;
+      this.isTopologyMinimized = false;
+    } else if (active && active !== activeBefore && !this.isLoading) {
+      // Changed in another tab
+      this.messages = [...active.messages];
+    }
+  }
+
+  /** Another tab saved: take in its changes, without writing. */
+  private syncConversationsFromStorage() {
+    try {
+      this.mergeOtherTabsConversations();
+    } catch (error) {
+      console.error("Failed to sync conversations:", error);
+    }
+  }
+
+  /**
+   * Save conversations to localStorage, merged with what other tabs saved
+   * so that none of theirs is lost
    */
   private saveConversationsToStorage() {
     try {
-      // Strip tokens from messages before saving to avoid bloating localStorage
-      const stripped = this.conversations.map((conv) => ({
-        ...conv,
-        messages: conv.messages.map((msg) => {
-          if (msg.tokens) {
-            const { tokens: _, ...rest } = msg;
-            return rest;
-          }
-          return msg;
-        }),
-      }));
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(stripped));
+      const merged = this.mergeOtherTabsConversations();
+      this.writeConversations(merged);
+      this.writeDeletedConversations(this.readDeletedConversations());
     } catch (error) {
       console.error("Failed to save conversations:", error);
     }
+  }
+
+  // Remember that conversations were deleted, for the other tabs
+  private markConversationsDeleted(ids: string[]) {
+    const now = Date.now();
+    this.deletedConversations = {
+      ...this.deletedConversations,
+      ...Object.fromEntries(ids.map((id) => [id, now])),
+    };
   }
 
   private loadDebugModeFromStorage() {
@@ -793,6 +1045,7 @@ class AppStore {
   createConversation(name?: string): string {
     const id = generateUUID();
     const now = Date.now();
+    this.freshErrorMessageId = null;
 
     // Try to derive model and strategy immediately from selected model or running instances
     let derivedModelId = this.selectedChatModel || null;
@@ -853,6 +1106,7 @@ class AppStore {
   loadConversation(id: string): boolean {
     const conversation = this.conversations.find((c) => c.id === id);
     if (!conversation) return false;
+    this.freshErrorMessageId = null;
 
     this.activeConversationId = id;
     this.messages = [...conversation.messages];
@@ -873,6 +1127,7 @@ class AppStore {
    * Delete a conversation by ID
    */
   deleteConversation(id: string) {
+    this.markConversationsDeleted([id]);
     this.conversations = this.conversations.filter((c) => c.id !== id);
 
     if (this.activeConversationId === id) {
@@ -889,6 +1144,17 @@ class AppStore {
    * Delete all conversations
    */
   deleteAllConversations() {
+    // Including those only other tabs have shown so far
+    let stored: Conversation[] = [];
+    try {
+      stored = this.readOtherTabsConversations() ?? [];
+    } catch {
+      // Unreadable: nothing more to delete
+    }
+    this.markConversationsDeleted([
+      ...this.conversations.map((c) => c.id),
+      ...stored.map((c) => c.id),
+    ]);
     this.conversations = [];
     this.activeConversationId = null;
     this.messages = [];
@@ -1131,6 +1397,8 @@ class AppStore {
     if (!message) return false;
 
     updater(message);
+    // Other tabs take the version updated last (see conversation_sync.ts)
+    conversation.updatedAt = Date.now();
     return true;
   }
 
@@ -1212,6 +1480,7 @@ class AppStore {
       timestamp: Date.now(),
     };
     conversation.messages.push(message);
+    conversation.updatedAt = Date.now();
     return message;
   }
 
@@ -1348,12 +1617,21 @@ class AppStore {
       } else {
         this.instanceLinks = {};
       }
+      this.deployments = data.deployments ?? {};
       if (data.downloads) {
         this.downloads = data.downloads;
       }
+      this.downloadActivity = this.downloadTracker.observe(
+        ongoingDownloadBytes(this.downloads),
+        Date.now(),
+      );
       if (data.nodeDisk) {
         this.nodeDisk = data.nodeDisk;
       }
+      this.nodeHeardAt = this.deviceSilence.observe(
+        data.lastSeen ?? {},
+        Date.now(),
+      );
       // Node identities (for OS version mismatch detection)
       this.nodeIdentities = data.nodeIdentities ?? {};
       // Thunderbolt identifiers per node
@@ -1681,6 +1959,7 @@ class AppStore {
     // Update the message to show the prefix
     this.messages[msgIndex].content = prefixText;
     this.messages[msgIndex].tokens = tokensToKeep;
+    this.messages[msgIndex].error = undefined;
     this.updateActiveConversation();
 
     // Set up for continuation - modify the existing message in place
@@ -1743,8 +2022,7 @@ class AppStore {
       });
 
       if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`API error: ${response.status} - ${errorText}`);
+        throw new Error(await readApiErrorMessage(response));
       }
 
       const reader = response.body?.getReader();
@@ -1870,13 +2148,7 @@ class AppStore {
       }
     } catch (error) {
       console.error("Error regenerating from token:", error);
-      if (this.conversationExists(targetConversationId)) {
-        this.updateConversationMessage(targetConversationId, messageId, (m) => {
-          m.content = `${prefixText}\n\nError: ${error instanceof Error ? error.message : "Unknown error"}`;
-        });
-        this.syncActiveMessagesIfNeeded(targetConversationId);
-        this.persistConversation(targetConversationId);
-      }
+      this.handleStreamingError(error, targetConversationId, messageId);
     } finally {
       this.isLoading = false;
       this.currentResponse = "";
@@ -1966,8 +2238,7 @@ class AppStore {
       });
 
       if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`${response.status} - ${errorText}`);
+        throw new Error(await readApiErrorMessage(response));
       }
 
       const reader = response.body?.getReader();
@@ -2088,7 +2359,6 @@ class AppStore {
         error,
         targetConversationId,
         assistantMessage.id,
-        "Unknown error",
       );
     } finally {
       this.isLoading = false;
@@ -2156,6 +2426,7 @@ class AppStore {
   /**
    * Parse an SSE stream and invoke a callback for each parsed JSON chunk.
    * Handles buffering, line splitting, and conversation deletion checks.
+   * Throws with the server's message if the stream contains an error chunk.
    *
    * @param reader - The stream reader from fetch response.body.getReader()
    * @param targetConversationId - The conversation ID to check for deletion
@@ -2208,12 +2479,16 @@ class AppStore {
           const data = trimmed.slice(6);
           if (data === "[DONE]") continue;
 
+          let streamError: string | null = null;
           try {
             const parsed = JSON.parse(data) as T;
-            onChunk(parsed);
+            // The server reports mid-stream failures as an `error` chunk
+            streamError = extractApiErrorMessage(parsed);
+            if (!streamError) onChunk(parsed);
           } catch {
             // Skip malformed JSON
           }
+          if (streamError) throw new Error(streamError);
         }
       }
     }
@@ -2222,38 +2497,51 @@ class AppStore {
     if (buffer.trim() && this.conversationExists(targetConversationId)) {
       const trimmed = buffer.trim();
       if (trimmed.startsWith("data: ") && trimmed.slice(6) !== "[DONE]") {
+        let streamError: string | null = null;
         try {
           const parsed = JSON.parse(trimmed.slice(6)) as T;
-          onChunk(parsed);
+          streamError = extractApiErrorMessage(parsed);
+          if (!streamError) onChunk(parsed);
         } catch {
           // Skip malformed JSON
         }
+        if (streamError) throw new Error(streamError);
       }
     }
   }
 
   /**
-   * Handle streaming errors by updating the assistant message with an error.
+   * Record why a reply stopped early. What was streamed before the error is
+   * kept; the error is shown under it as one short sentence (never a
+   * traceback, see describeStreamError).
    *
    * @param error - The caught error
    * @param targetConversationId - The conversation ID
    * @param assistantMessageId - The assistant message ID to update
-   * @param errorPrefix - Optional prefix for the error message (e.g., "Failed to generate image")
+   * @param kind - What was being generated, for the wording
    */
   private handleStreamingError(
     error: unknown,
     targetConversationId: string,
     assistantMessageId: string,
-    errorPrefix = "Failed to get response",
+    kind: StreamKind = "reply",
   ): void {
     if (this.conversationExists(targetConversationId)) {
       this.updateConversationMessage(
         targetConversationId,
         assistantMessageId,
         (msg) => {
-          msg.content = `Error: ${error instanceof Error ? error.message : errorPrefix}`;
+          // Progress placeholders ("Generating image...") aren't a reply
+          if (isProgressPlaceholder(msg.content)) msg.content = "";
+          msg.error = describeStreamError(
+            error instanceof Error ? error.message : String(error ?? ""),
+            kind,
+          );
         },
       );
+      if (this.activeConversationId === targetConversationId) {
+        this.freshErrorMessageId = assistantMessageId;
+      }
       this.syncActiveMessagesIfNeeded(targetConversationId);
       this.persistConversation(targetConversationId);
     }
@@ -2324,6 +2612,7 @@ class AppStore {
     this.ttftMs = null;
     this.tps = null;
     this.totalTokens = 0;
+    this.freshErrorMessageId = null;
 
     // Build attachments from files
     const attachments: MessageAttachment[] = [];
@@ -2525,6 +2814,7 @@ class AppStore {
 
       const abortController = new AbortController();
       this.currentAbortController = abortController;
+      this.streamingConversationId = targetConversationId;
 
       const response = await apiFetch("/v1/chat/completions", {
         method: "POST",
@@ -2546,8 +2836,7 @@ class AppStore {
       });
 
       if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`API error: ${response.status} - ${errorText}`);
+        throw new Error(await readApiErrorMessage(response));
       }
 
       const reader = response.body?.getReader();
@@ -2727,11 +3016,11 @@ class AppStore {
           error,
           targetConversationId,
           assistantMessage.id,
-          "Failed to get response",
         );
       }
     } finally {
       this.currentAbortController = null;
+      this.streamingConversationId = null;
       this.prefillProgress = null;
       this.isLoading = false;
       this.currentResponse = "";
@@ -2855,8 +3144,7 @@ class AppStore {
       });
 
       if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`API error: ${response.status} - ${errorText}`);
+        throw new Error(await readApiErrorMessage(response));
       }
 
       // Streaming requires both stream=true AND partialImages > 0
@@ -3007,7 +3295,7 @@ class AppStore {
           error,
           targetConversationId,
           assistantMessage.id,
-          "Failed to generate image",
+          "image",
         );
       }
     } finally {
@@ -3143,8 +3431,7 @@ class AppStore {
       });
 
       if (!apiResponse.ok) {
-        const errorText = await apiResponse.text();
-        throw new Error(`API error: ${apiResponse.status} - ${errorText}`);
+        throw new Error(await readApiErrorMessage(apiResponse));
       }
 
       // Streaming requires both stream=true AND partialImages > 0
@@ -3256,7 +3543,7 @@ class AppStore {
           error,
           targetConversationId,
           assistantMessage.id,
-          "Failed to edit image",
+          "image",
         );
       }
     } finally {
@@ -3299,6 +3586,21 @@ class AppStore {
     if (conv) {
       conv.enableThinking = enabled;
       this.saveConversationsToStorage();
+    }
+  }
+
+  /** Download all of a model from the catalogue to a node. */
+  async startModelDownload(nodeId: string, modelId: string): Promise<void> {
+    const response = await apiFetch("/download/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ targetNodeId: nodeId, modelId }),
+    });
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(
+        `Failed to start download: ${response.status} - ${errorText}`,
+      );
     }
   }
 
@@ -3418,10 +3720,7 @@ class AppStore {
         },
       );
       if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(
-          `Failed to delete download: ${response.status} - ${errorText}`,
-        );
+        throw new Error(await readApiErrorMessage(response));
       }
     } catch (error) {
       console.error("Error deleting download:", error);
@@ -3499,6 +3798,7 @@ export const hasStartedChat = () => appStore.hasStartedChat;
 export const messages = () => appStore.messages;
 export const currentResponse = () => appStore.currentResponse;
 export const isLoading = () => appStore.isLoading;
+export const freshErrorMessageId = () => appStore.freshErrorMessageId;
 export const ttftMs = () => appStore.ttftMs;
 export const tps = () => appStore.tps;
 export const totalTokens = () => appStore.totalTokens;
@@ -3507,6 +3807,7 @@ export const topologyData = () => appStore.topologyData;
 export const instances = () => appStore.instances;
 export const runners = () => appStore.runners;
 export const instanceLinks = () => appStore.instanceLinks;
+export const deployments = () => appStore.deployments;
 export const featureFlags = () => appStore.featureFlags;
 export const createInstanceLink = (
   prefillInstances: string[],
@@ -3633,6 +3934,11 @@ export const isConnected = () => appStore.isConnected;
 
 // Node identities (for OS version mismatch detection)
 export const nodeIdentities = () => appStore.nodeIdentities;
+// When each node was last heard from (browser clock, ms)
+export const nodeHeardAt = () => appStore.nodeHeardAt;
+
+// Whether each download in progress is moving, by downloadKey
+export const downloadActivity = () => appStore.downloadActivity;
 
 // Thunderbolt & RDMA status
 export const nodeThunderbolt = () => appStore.nodeThunderbolt;
@@ -3651,6 +3957,8 @@ export const resetImageGenerationParams = () =>
 // Download actions
 export const startDownload = (nodeId: string, shardMetadata: object) =>
   appStore.startDownload(nodeId, shardMetadata);
+export const startModelDownload = (nodeId: string, modelId: string) =>
+  appStore.startModelDownload(nodeId, modelId);
 export const cancelDownload = (nodeId: string, modelId: string) =>
   appStore.cancelDownload(nodeId, modelId);
 export const deleteDownload = (nodeId: string, modelId: string) =>

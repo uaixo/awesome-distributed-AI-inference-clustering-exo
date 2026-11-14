@@ -7,6 +7,7 @@ from typing import Callable, Generator, cast, get_args
 
 import mlx.core as mx
 from mlx_lm.generate import (
+    generation_stream,
     maybe_quantize_kv_cache,
     stream_generate,
 )
@@ -31,14 +32,6 @@ from exo.shared.types.text_generation import (
 from exo.shared.types.worker.runner_response import (
     GenerationResponse,
 )
-from exo.worker.engines.mlx.auto_parallel import (
-    PipelineFirstLayer,
-    PipelineLastLayer,
-    clear_prefill_sends,
-    flush_prefill_sends,
-    set_pipeline_prefill,
-    set_pipeline_queue_sends,
-)
 from exo.worker.engines.mlx.cache import (
     CacheSnapshot,
     KVPrefixCache,
@@ -56,7 +49,16 @@ from exo.worker.engines.mlx.constants import (
     MAX_TOKENS,
 )
 from exo.worker.engines.mlx.generator.remote_prefill import remote_prefill
-from exo.worker.engines.mlx.types import KVCacheType, Model
+from exo.worker.engines.mlx.models.registry import keeps_think_tags, model_type_of
+from exo.worker.engines.mlx.sharding.pipeline import (
+    PipelineFirstLayer,
+    PipelineLastLayer,
+    clear_prefill_sends,
+    flush_prefill_sends,
+    set_pipeline_prefill,
+    set_pipeline_queue_sends,
+)
+from exo.worker.engines.mlx.types import KVCacheType, Model, SnapshotCache
 from exo.worker.engines.mlx.utils_mlx import (
     apply_chat_template,
     fix_unmatched_think_end_tokens,
@@ -71,10 +73,9 @@ from exo.worker.engines.mlx.vision import (
     prepare_vision,
 )
 from exo.worker.runner.bootstrap import logger
+from exo.worker.runner.context_length import check_context_length
 
 REMOTE_PREFILL_MIN_TOKENS = 1000
-
-generation_stream = mx.new_stream(mx.default_device())
 
 _MIN_PREFIX_HIT_RATIO_TO_UPDATE = 0.5
 
@@ -326,6 +327,9 @@ def prefill(
 
     set_pipeline_prefill(model, is_prefill=True)
 
+    # The batch's next decode step may still be running: let it finish before this prefill's
+    # collectives, as for the batch's own prompts (see opt_batch_gen._prompt_after_decode_step)
+    mx.synchronize(generation_stream)
     mx_barrier(group)
     logger.info("Starting prefill")
 
@@ -383,7 +387,7 @@ def prefill(
             if restored is not None:
                 cache[i] = restored  # type: ignore
         else:
-            assert not non_trimmable
+            assert not non_trimmable and not isinstance(c, SnapshotCache)
             c.trim(2)
 
     elapsed = time.perf_counter() - start_time
@@ -418,6 +422,7 @@ def warmup_inference(
     warmup_prompt = apply_chat_template(
         tokenizer=tokenizer,
         task_params=warmup_task_params,
+        model_type=model_type_of(model),
     )
 
     tokens_generated = 0
@@ -446,14 +451,12 @@ def warmup_inference(
 
     logger.info(f"warmed up by generating {tokens_generated} tokens")
     if group is not None:
-        check_for_cancel_every = int(
-            mx.max(
-                mx.distributed.all_gather(
-                    mx.array([check_for_cancel_every]),
-                    group=group,
-                )
-            ).item()
+        gathered = mx.distributed.all_gather(
+            mx.array([check_for_cancel_every]), group=group
         )
+        # On the CPU before the GPU max (see PipelineLastLayer)
+        mx.eval(gathered)
+        check_for_cancel_every = int(mx.max(gathered).item())
 
     logger.info(
         f"runner checking for cancellation every {check_for_cancel_every} tokens"
@@ -540,6 +543,7 @@ def mlx_generate(
     distributed_prompt_progress_callback: Callable[[], None] | None = None,
     on_generation_token: Callable[[], None] | None = None,
     vision_processor: VisionProcessor | None = None,
+    context_length: int = 0,
 ) -> Generator[GenerationResponse]:
     # Ensure that generation stats only contains peak memory for this generation
     mx.reset_peak_memory()
@@ -549,7 +553,8 @@ def mlx_generate(
 
     # Encode prompt once at the top and fix unmatched think tags
     all_prompt_tokens = encode_prompt(tokenizer, prompt)
-    all_prompt_tokens = fix_unmatched_think_end_tokens(all_prompt_tokens, tokenizer)
+    if not keeps_think_tags(task, model_type_of(model)):
+        all_prompt_tokens = fix_unmatched_think_end_tokens(all_prompt_tokens, tokenizer)
     min_prefix_hit_length = max(1000, system_prompt_token_count(task, tokenizer))
 
     vision: VisionResult | None = None
@@ -571,6 +576,8 @@ def mlx_generate(
     if vision is not None:
         all_prompt_tokens = vision.prompt_tokens
     media_regions: list[MediaRegion] = vision.media_regions if vision else []
+    # Before any work on a request the model can't take (and any collective)
+    check_context_length(len(all_prompt_tokens), task.max_output_tokens, context_length)
 
     # Do not use the prefix cache if we are trying to do benchmarks.
     is_bench = task.bench

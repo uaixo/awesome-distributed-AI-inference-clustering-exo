@@ -2,17 +2,17 @@ import Foundation
 
 /// The signals that this process is hosting a test bundle, read once at first use.
 ///
-/// `EXOTests` is an app-hosted target, so `xcodebuild test` launches the app and runs
-/// `EXOApp.init`. What that init starts for a real session has to stay out of a test
-/// process: the network-setup step opens a modal alert nothing would dismiss,
-/// `UNUserNotificationCenter` needs a bundle the system has registered, and the node,
-/// the pollers and Sparkle would all outlive the tests.
+/// `EXOTests` is an app-hosted target, so `xcodebuild test` launches the app. What a
+/// real session starts has to stay out of a test process: the welcome window, the login
+/// item, `UNUserNotificationCenter`, which needs a bundle the system has registered, and
+/// the node, the pollers and Sparkle, which would all outlive the tests. `main.swift`
+/// reads these signals to host the tests without entering `EXOApp.main()` at all, and
+/// `EXOApp.init` reads them again should it be reached some other way.
 ///
-/// Missing every signal does not fail a test, it hangs the run: `EXOApp.init` completes
-/// before XCTest executes anything, so `startSession` reaches `alert.runModal()` and the
-/// process sits at that alert until the job times out. Three signals are read for that
-/// reason, one of them independent of any name Apple can change, and `ExoAPIKeyTests`
-/// asserts the independent one still holds.
+/// Missing every signal does not fail a test, it starts a real session beside the
+/// tests: the app has launched before XCTest executes anything. Three signals are read
+/// for that reason, one of them independent of any name Apple can change, and
+/// `ExoAPIKeyTests` asserts the independent one still holds.
 struct TestHostSignals {
     /// True when the XCTest framework is loaded in this process.
     ///
@@ -31,7 +31,7 @@ struct TestHostSignals {
         xctestFrameworkLoaded || configurationFilePath || bundlePath
     }
 
-    /// The signals as they stood when something first read them, which is `EXOApp.init`.
+    /// The signals as they stood when something first read them, which is `main.swift`.
     static let atLaunch = TestHostSignals()
 
     private init() {

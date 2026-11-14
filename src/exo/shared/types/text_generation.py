@@ -37,7 +37,7 @@ def resolve_reasoning_params(
     enable_thinking: bool | None,
 ) -> tuple[ReasoningEffort | None, bool | None]:
     """
-    enable_thinking=True  -> reasoning_effort="medium"
+    enable_thinking=True  -> reasoning_effort stays unset (the model's default)
     enable_thinking=False -> reasoning_effort="none"
     reasoning_effort="none" -> enable_thinking=False
     reasoning_effort=<anything else> -> enable_thinking=True
@@ -45,8 +45,8 @@ def resolve_reasoning_params(
     resolved_effort: ReasoningEffort | None = reasoning_effort
     resolved_thinking: bool | None = enable_thinking
 
-    if reasoning_effort is None and enable_thinking is not None:
-        resolved_effort = "medium" if enable_thinking else "none"
+    if reasoning_effort is None and enable_thinking is False:
+        resolved_effort = "none"
 
     if enable_thinking is None and reasoning_effort is not None:
         resolved_thinking = reasoning_effort != "none"
@@ -66,10 +66,6 @@ class InputMessage(BaseModel, frozen=True):
 
 
 class Base64Image(TruncatingString):
-    truncate_length = 10
-
-
-class Base64ImageHash(TruncatingString):
     truncate_length = 10
 
 
@@ -129,8 +125,8 @@ class TextGenerationTaskParams(BaseModel, frozen=True):
     repetition_context_size: int | None = None
     presence_penalty: float | None = None
     frequency_penalty: float | None = None
+    # Sent inline with the request to the nodes that run it
     images: list[Base64Image] = Field(default_factory=list)
-    image_hashes: dict[int, Base64ImageHash] = Field(default_factory=dict)
 
     prefill_endpoint: str | None = None
 

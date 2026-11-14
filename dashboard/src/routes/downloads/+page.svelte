@@ -5,29 +5,56 @@
   import {
     topologyData,
     downloads,
+    downloadActivity,
+    instances,
+    runners,
     nodeDisk,
     refreshState,
     lastUpdate as lastUpdateStore,
     startDownload,
+    startModelDownload,
     cancelDownload,
     deleteDownload,
   } from "$lib/stores/app.svelte";
+  import { addToast } from "$lib/stores/toast.svelte";
+  import { apiFetch } from "$lib/api";
   import {
     getDownloadTag,
     extractModelIdFromDownload,
     extractShardMetadata,
+    deleteDownloadQuestion,
+    modelStateOnNode,
+    catalogueModelInfo,
+    modelDisplayName,
+    type CatalogueModel,
+    type ModelCardInfo,
   } from "$lib/utils/downloads";
+  import {
+    describeStall,
+    downloadKey,
+    estimateRemainingMs,
+    isStalled,
+  } from "$lib/utils/download_activity";
   import HeaderNav from "$lib/components/HeaderNav.svelte";
 
   type CellStatus =
-    | { kind: "completed"; totalBytes: number; modelDirectory?: string }
+    | {
+        kind: "completed";
+        totalBytes: number;
+        readOnly: boolean;
+        modelDirectory?: string;
+      }
     | {
         kind: "downloading";
         percentage: number;
         downloadedBytes: number;
         totalBytes: number;
         speed: number;
+        // 0 when not known
         etaMs: number;
+        // No bytes for a while, and what /state tells about it
+        stalled: boolean;
+        stalledText: string;
         modelDirectory?: string;
       }
     | {
@@ -36,18 +63,8 @@
         total: number;
         modelDirectory?: string;
       }
-    | { kind: "failed"; modelDirectory?: string }
+    | { kind: "failed"; errorMessage?: string; modelDirectory?: string }
     | { kind: "not_present" };
-
-  type ModelCardInfo = {
-    family: string;
-    quantization: string;
-    baseModel: string;
-    capabilities: string[];
-    storageSize: number;
-    nLayers: number;
-    supportsTensor: boolean;
-  };
 
   type ModelRow = {
     modelId: string;
@@ -66,6 +83,7 @@
 
   const data = $derived(topologyData());
   const downloadsData = $derived(downloads());
+  const activityData = $derived(downloadActivity());
   const nodeDiskData = $derived(nodeDisk());
 
   function getNodeLabel(nodeId: string): string {
@@ -154,13 +172,18 @@
       return { prettyName: null, card: null };
     const meta = modelMeta as Record<string, unknown>;
 
-    const prettyName = (meta.prettyName as string) ?? null;
+    const baseModel =
+      (meta.base_model as string) ?? (meta.baseModel as string) ?? "";
+    const quantization = (meta.quantization as string) ?? "";
+    // The model's display name ("Llama 3.2 1B · 4bit"); the repo id is shown
+    // under it
+    const prettyName =
+      (meta.prettyName as string) ?? modelDisplayName(baseModel, quantization);
 
     const card: ModelCardInfo = {
       family: (meta.family as string) ?? "",
-      quantization: (meta.quantization as string) ?? "",
-      baseModel:
-        (meta.base_model as string) ?? (meta.baseModel as string) ?? "",
+      quantization,
+      baseModel,
       capabilities: Array.isArray(meta.capabilities)
         ? (meta.capabilities as string[])
         : [],
@@ -178,16 +201,51 @@
   let modelRows = $state<ModelRow[]>([]);
   let nodeColumns = $state<NodeColumn[]>([]);
   let infoRow = $state<ModelRow | null>(null);
+  // Every model exo knows. exo lists a model on a device only when the device
+  // has some of it, so the rest of the catalogue comes from here.
+  let catalogue = $state<CatalogueModel[]>([]);
+
+  async function loadCatalogue() {
+    try {
+      const response = await apiFetch("/models");
+      if (!response.ok) return;
+      const body = (await response.json()) as { data?: CatalogueModel[] };
+      catalogue = body.data ?? [];
+    } catch {
+      // The models on devices still show
+    }
+  }
+
+  // A model no device lists has no shard to copy: download it whole
+  async function downloadTo(nodeId: string, row: ModelRow) {
+    try {
+      if (row.shardMetadata) await startDownload(nodeId, row.shardMetadata);
+      else await startModelDownload(nodeId, row.modelId);
+    } catch (error) {
+      addToast({
+        type: "error",
+        message: `Couldn't start downloading ${row.prettyName ?? row.modelId}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      });
+    }
+  }
 
   $effect(() => {
     try {
-      if (!downloadsData || Object.keys(downloadsData).length === 0) {
+      // Every device in the cluster gets a column, even one with nothing
+      // downloaded, so it can still be downloaded to.
+      const allNodeIds = [
+        ...new Set([
+          ...Object.keys(data?.nodes ?? {}),
+          ...Object.keys(downloadsData ?? {}),
+        ]),
+      ];
+      if (allNodeIds.length === 0) {
         modelRows = [];
         nodeColumns = [];
         return;
       }
-
-      const allNodeIds = Object.keys(downloadsData);
       const columns: NodeColumn[] = allNodeIds.map((nodeId) => {
         const diskInfo = nodeDiskData?.[nodeId];
         return {
@@ -200,7 +258,9 @@
 
       const rowMap = new Map<string, ModelRow>();
 
-      for (const [nodeId, nodeDownloads] of Object.entries(downloadsData)) {
+      for (const [nodeId, nodeDownloads] of Object.entries(
+        downloadsData ?? {},
+      )) {
         const entries = Array.isArray(nodeDownloads)
           ? nodeDownloads
           : nodeDownloads && typeof nodeDownloads === "object"
@@ -237,7 +297,9 @@
           let cell: CellStatus;
           if (tag === "DownloadCompleted") {
             const totalBytes = getBytes(payload.total);
-            cell = { kind: "completed", totalBytes, modelDirectory };
+            // Copies in a read-only models directory can't be deleted by exo
+            const readOnly = Boolean(payload.read_only ?? payload.readOnly);
+            cell = { kind: "completed", totalBytes, readOnly, modelDirectory };
           } else if (tag === "DownloadOngoing") {
             const rawProgress =
               payload.download_progress ?? payload.downloadProgress ?? {};
@@ -245,8 +307,18 @@
             const totalBytes = getBytes(prog.total ?? payload.total);
             const downloadedBytes = getBytes(prog.downloaded);
             const speed = (prog.speed as number) ?? 0;
+            // The device's speed is an average since the start; the bytes
+            // timed here say whether it's moving and when it will finish
+            const activity = activityData[downloadKey(nodeId, modelId)];
+            const now = Date.now();
             const etaMs =
-              (prog.eta_ms as number) ?? (prog.etaMs as number) ?? 0;
+              totalBytes > 0
+                ? (estimateRemainingMs(
+                    totalBytes - downloadedBytes,
+                    activity,
+                    now,
+                  ) ?? 0)
+                : 0;
             const percentage =
               totalBytes > 0 ? (downloadedBytes / totalBytes) * 100 : 0;
             cell = {
@@ -256,10 +328,15 @@
               totalBytes,
               speed,
               etaMs,
+              stalled: isStalled(activity, now),
+              stalledText: describeStall(activity, totalBytes, now),
               modelDirectory,
             };
           } else if (tag === "DownloadFailed") {
-            cell = { kind: "failed", modelDirectory };
+            const errorMessage =
+              ((payload.error_message ?? payload.errorMessage) as string) ||
+              undefined;
+            cell = { kind: "failed", errorMessage, modelDirectory };
           } else {
             const downloaded = getBytes(
               payload.downloaded ??
@@ -282,6 +359,18 @@
             row.cells[nodeId] = cell;
           }
         }
+      }
+
+      for (const model of catalogue) {
+        if (rowMap.has(model.id)) continue;
+        const { prettyName, card } = catalogueModelInfo(model);
+        rowMap.set(model.id, {
+          modelId: model.id,
+          prettyName,
+          cells: {},
+          shardMetadata: null,
+          modelCard: card,
+        });
       }
 
       function rowSortKey(row: ModelRow): number {
@@ -342,11 +431,58 @@
   });
 
   const hasDownloads = $derived(modelRows.length > 0);
+
+  async function confirmAndDelete(row: ModelRow, col: NodeColumn) {
+    const name = row.prettyName ?? row.modelId;
+    const cell = row.cells[col.nodeId];
+    const size =
+      cell?.kind === "completed"
+        ? formatBytes(cell.totalBytes)
+        : cell?.kind === "downloading" && cell.downloadedBytes > 0
+          ? `${formatBytes(cell.downloadedBytes)} downloaded`
+          : cell?.kind === "pending" && cell.downloaded > 0
+            ? `${formatBytes(cell.downloaded)} downloaded`
+            : null;
+    if (
+      !confirm(
+        deleteDownloadQuestion({
+          modelName: name,
+          deviceName: col.label,
+          size,
+          // Deleting doesn't stop it: say so, it would download again
+          state: modelStateOnNode(
+            instances(),
+            runners(),
+            col.nodeId,
+            row.modelId,
+          ),
+        }),
+      )
+    )
+      return;
+    try {
+      await deleteDownload(col.nodeId, row.modelId);
+    } catch (error) {
+      // fetch() rejects with a TypeError when the API can't be reached
+      const reason =
+        error instanceof TypeError
+          ? "can't reach EXO"
+          : error instanceof Error
+            ? error.message
+            : String(error);
+      addToast({
+        type: "error",
+        message: `Couldn't delete ${name} from ${col.label}: ${reason}`,
+      });
+    }
+  }
+
   const lastUpdateTs = $derived(lastUpdateStore());
   const downloadKeys = $derived(Object.keys(downloadsData || {}));
 
   onMount(() => {
     refreshState();
+    loadCatalogue();
   });
 </script>
 
@@ -392,12 +528,12 @@
   </svg>
 {/snippet}
 
-{#snippet deleteButton(nodeId: string, modelId: string)}
+{#snippet deleteButton(row: ModelRow, col: NodeColumn)}
   <button
     type="button"
     class="text-white/50 hover:text-red-400 transition-colors cursor-pointer"
-    onclick={() => deleteDownload(nodeId, modelId)}
-    title="Delete from this node"
+    onclick={() => confirmAndDelete(row, col)}
+    title="Delete from this device"
   >
     {@render trashIcon()}
   </button>
@@ -414,7 +550,7 @@
           Downloads
         </h1>
         <p class="text-sm text-exo-light-gray">
-          Overview of models on each node
+          Models downloaded on each device
         </p>
       </div>
       <div class="flex items-center gap-3">
@@ -524,7 +660,9 @@
                     {#if cell.kind === "completed"}
                       <div
                         class="flex flex-col items-center gap-1"
-                        title="Completed ({formatBytes(cell.totalBytes)})"
+                        title={cell.readOnly
+                          ? `Completed (${formatBytes(cell.totalBytes)}) · read-only, can't be deleted here`
+                          : `Completed (${formatBytes(cell.totalBytes)})`}
                       >
                         <svg
                           class="w-7 h-7 text-green-400"
@@ -540,33 +678,43 @@
                         <span class="text-xs text-white/70"
                           >{formatBytes(cell.totalBytes)}</span
                         >
-                        {@render deleteButton(col.nodeId, row.modelId)}
+                        {#if !cell.readOnly}
+                          {@render deleteButton(row, col)}
+                        {/if}
                       </div>
                     {:else if cell.kind === "downloading"}
                       <div
                         class="flex flex-col items-center gap-1"
                         title="{formatBytes(
                           cell.downloadedBytes,
-                        )} / {formatBytes(cell.totalBytes)} - {formatSpeed(
-                          cell.speed,
-                        )} - ETA {formatEta(cell.etaMs)}"
+                        )} / {formatBytes(cell.totalBytes)} - {cell.stalled
+                          ? cell.stalledText
+                          : formatSpeed(cell.speed)} - ETA {cell.etaMs > 0
+                          ? formatEta(cell.etaMs)
+                          : 'unknown'}"
                       >
-                        <span class="text-exo-yellow text-sm font-medium"
+                        <span class="text-blue-400 text-sm font-medium"
                           >{clampPercent(cell.percentage).toFixed(1)}%</span
                         >
                         <div
                           class="w-16 h-2 bg-exo-black/60 rounded-sm overflow-hidden"
                         >
                           <div
-                            class="h-full bg-gradient-to-r from-exo-yellow to-exo-yellow/70 transition-all duration-300"
+                            class="h-full bg-gradient-to-r from-blue-500 to-blue-400 transition-all duration-300"
                             style="width: {clampPercent(
                               cell.percentage,
                             ).toFixed(1)}%"
                           ></div>
                         </div>
-                        <span class="text-[10px] text-white/70"
-                          >{formatSpeed(cell.speed)}</span
-                        >
+                        {#if cell.stalled}
+                          <span class="text-[10px] text-orange-400 text-center"
+                            >{cell.stalledText}</span
+                          >
+                        {:else}
+                          <span class="text-[10px] text-white/70"
+                            >{formatSpeed(cell.speed)}</span
+                          >
+                        {/if}
                         <div class="flex gap-1 mt-0.5">
                           <button
                             type="button"
@@ -577,7 +725,7 @@
                           >
                             {@render pauseIcon()}
                           </button>
-                          {@render deleteButton(col.nodeId, row.modelId)}
+                          {@render deleteButton(row, col)}
                         </div>
                       </div>
                     {:else if cell.kind === "pending"}
@@ -611,7 +759,7 @@
                                 class="text-white/50 hover:text-exo-yellow transition-colors cursor-pointer"
                                 onclick={() =>
                                   startDownload(col.nodeId, row.shardMetadata!)}
-                                title="Resume download on this node"
+                                title="Resume download on this device"
                               >
                                 {@render downloadIcon()}
                               </button>
@@ -620,7 +768,7 @@
                                 >paused</span
                               >
                             {/if}
-                            {@render deleteButton(col.nodeId, row.modelId)}
+                            {@render deleteButton(row, col)}
                           </div>
                         {:else if row.shardMetadata}
                           <button
@@ -628,7 +776,7 @@
                             class="text-white/50 hover:text-exo-yellow transition-colors cursor-pointer"
                             onclick={() =>
                               startDownload(col.nodeId, row.shardMetadata!)}
-                            title="Start download on this node"
+                            title="Start download on this device"
                           >
                             {@render downloadIcon("w-6 h-6")}
                           </button>
@@ -639,7 +787,9 @@
                     {:else if cell.kind === "failed"}
                       <div
                         class="flex flex-col items-center gap-1"
-                        title="Download failed"
+                        title={cell.errorMessage
+                          ? `Download failed: ${cell.errorMessage}`
+                          : "Download failed"}
                       >
                         <svg
                           class="w-7 h-7 text-red-400"
@@ -652,6 +802,13 @@
                             clip-rule="evenodd"
                           ></path>
                         </svg>
+                        {#if cell.errorMessage}
+                          <span
+                            class="text-[10px] text-red-400/80 max-w-[200px] whitespace-normal break-words line-clamp-3"
+                          >
+                            {cell.errorMessage}
+                          </span>
+                        {/if}
                         <div class="flex gap-1">
                           {#if row.shardMetadata}
                             <button
@@ -659,33 +816,28 @@
                               class="text-white/50 hover:text-exo-yellow transition-colors cursor-pointer"
                               onclick={() =>
                                 startDownload(col.nodeId, row.shardMetadata!)}
-                              title="Retry download on this node"
+                              title="Retry download on this device"
                             >
                               {@render downloadIcon()}
                             </button>
                           {/if}
-                          {@render deleteButton(col.nodeId, row.modelId)}
+                          {@render deleteButton(row, col)}
                         </div>
                       </div>
                     {:else}
+                      <!-- Nothing of the model on this device: the button a 0-byte "not started" entry had -->
                       <div
-                        class="flex flex-col items-center"
-                        title="Not on this node"
+                        class="flex flex-col items-center gap-1"
+                        title="Not on this device"
                       >
-                        <span class="text-exo-medium-gray text-lg leading-none"
-                          >--</span
+                        <button
+                          type="button"
+                          class="text-white/50 hover:text-exo-yellow transition-colors cursor-pointer"
+                          onclick={() => downloadTo(col.nodeId, row)}
+                          title="Start download on this device"
                         >
-                        {#if row.shardMetadata}
-                          <button
-                            type="button"
-                            class="text-white/50 hover:text-exo-yellow transition-colors mt-0.5 opacity-0 group-hover:opacity-100 cursor-pointer"
-                            onclick={() =>
-                              startDownload(col.nodeId, row.shardMetadata!)}
-                            title="Download to this node"
-                          >
-                            {@render downloadIcon()}
-                          </button>
-                        {/if}
+                          {@render downloadIcon("w-6 h-6")}
+                        </button>
                       </div>
                     {/if}
                   </td>
@@ -804,7 +956,7 @@
               />
               <path class="text-green-400" d="m9 13 2 2 4-4" />
             </svg>
-            <span class="text-white/40">On nodes:</span>
+            <span class="text-white/40">On devices:</span>
           </div>
           <div class="flex flex-col gap-1.5 mt-1">
             {#each nodeColumns as col}
@@ -816,7 +968,7 @@
                     'completed'
                       ? 'bg-green-500/10 text-green-400/80 border border-green-500/20'
                       : cellStatus.kind === 'downloading'
-                        ? 'bg-exo-yellow/10 text-exo-yellow/80 border border-exo-yellow/20'
+                        ? 'bg-blue-500/10 text-blue-400/80 border border-blue-500/20'
                         : cellStatus.kind === 'failed'
                           ? 'bg-red-500/10 text-red-400/80 border border-red-500/20'
                           : 'bg-white/5 text-white/50 border border-white/10'}"

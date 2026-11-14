@@ -20,9 +20,9 @@ from exo.master.tests.conftest import (
 from exo.shared.models.model_cards import ModelCard, ModelId, ModelTask
 from exo.shared.topology import Topology
 from exo.shared.types.backends import Backend
-from exo.shared.types.commands import CommandId, PlaceInstance
 from exo.shared.types.common import NodeId
 from exo.shared.types.memory import Memory
+from exo.shared.types.placement import PlacementRequest
 from exo.shared.types.profiling import NodeNetworkInfo
 from exo.shared.types.topology import Cycle
 from exo.shared.types.worker.instances import InstanceMeta
@@ -133,8 +133,7 @@ def test_placement_stops_at_the_first_ring_size_that_fits(
     grouped[longest] = _RefusesToBeRead()
 
     placements = place_instance(
-        PlaceInstance(
-            command_id=CommandId(),
+        PlacementRequest(
             model_card=model_card,
             sharding=Sharding.Pipeline,
             instance_meta=InstanceMeta.MlxRing,
@@ -155,16 +154,18 @@ def test_placement_stops_at_the_first_ring_size_that_fits(
     assert len(instance.shard_assignments.node_to_runner) == 2
 
 
-def test_a_ring_size_nothing_offers_reports_memory_rather_than_reading_further(
+def test_a_ring_size_nothing_offers_reports_how_many_nodes_are_connected(
     model_card: ModelCard,
 ):
     topology, node_ids = create_mesh_topology(3)
     node_memory = {node_id: create_node_memory(10**6) for node_id in node_ids}
 
-    with pytest.raises(ValueError, match="No cycles found with sufficient memory"):
+    with pytest.raises(
+        ValueError,
+        match="Needs 4 connected nodes, but at most 3 are connected to each other",
+    ):
         place_instance(
-            PlaceInstance(
-                command_id=CommandId(),
+            PlacementRequest(
                 model_card=model_card,
                 sharding=Sharding.Pipeline,
                 instance_meta=InstanceMeta.MlxRing,
@@ -205,8 +206,7 @@ def _place(
 ):
     topology, node_ids = create_mesh_topology(node_count)
     return place_instance(
-        PlaceInstance(
-            command_id=CommandId(),
+        PlacementRequest(
             model_card=model_card,
             sharding=sharding,
             instance_meta=InstanceMeta.MlxRing,
@@ -222,7 +222,7 @@ def _place(
 
 
 def test_gemma_4_places_on_the_one_node_that_holds_it(model_card: ModelCard):
-    gemma = model_card.model_copy(update={"base_model": "Gemma 4 27B"})
+    gemma = model_card.model_copy(update={"model_type": "gemma4"})
 
     placements = _place(gemma, node_ram=10**9)
 
@@ -231,7 +231,7 @@ def test_gemma_4_places_on_the_one_node_that_holds_it(model_card: ModelCard):
 
 
 def test_gemma_4_is_refused_when_no_single_node_holds_it(model_card: ModelCard):
-    gemma = model_card.model_copy(update={"base_model": "Gemma 4 27B"})
+    gemma = model_card.model_copy(update={"model_type": "gemma4"})
 
     # Two nodes together hold it, which pipeline sharding could normally use, but Gemma 4
     # can only be placed on one node.
@@ -241,7 +241,10 @@ def test_gemma_4_is_refused_when_no_single_node_holds_it(model_card: ModelCard):
 
 def test_deep_seek_v3_1_8bit_refuses_pipeline_sharding(model_card: ModelCard):
     deepseek = model_card.model_copy(
-        update={"model_id": ModelId("mlx-community/DeepSeek-V3.1-8bit")}
+        update={
+            "model_id": ModelId("mlx-community/DeepSeek-V3.1-8bit"),
+            "model_type": "deepseek_v3",
+        }
     )
 
     with pytest.raises(ValueError, match="DeepSeek V3.1"):
@@ -262,7 +265,7 @@ def test_a_cluster_too_small_reports_memory_rather_than_the_sharding(
 
     # Both would raise. Memory comes first, because a cluster that cannot hold the model
     # at all has not got as far as choosing how to shard it.
-    with pytest.raises(ValueError, match="No cycles found with sufficient memory"):
+    with pytest.raises(ValueError, match="Not enough memory"):
         _place(no_tensor, node_ram=1, sharding=Sharding.Tensor)
 
 
@@ -276,8 +279,7 @@ def test_a_ring_size_that_was_never_searched_is_not_reported_as_a_memory_problem
 
     with pytest.raises(PlacementSearchTruncatedError) as raised:
         place_instance(
-            PlaceInstance(
-                command_id=CommandId(),
+            PlacementRequest(
                 model_card=model_card,
                 sharding=Sharding.Pipeline,
                 instance_meta=InstanceMeta.MlxRing,
@@ -303,12 +305,9 @@ def test_a_searched_ring_size_that_does_not_fit_still_reports_memory(
 
     # The cluster was searched in full, so nothing was withheld and the honest answer is
     # that it cannot hold the model.
-    with pytest.raises(
-        ValueError, match="No cycles found with sufficient memory"
-    ) as raised:
+    with pytest.raises(ValueError, match="Not enough memory") as raised:
         place_instance(
-            PlaceInstance(
-                command_id=CommandId(),
+            PlacementRequest(
                 model_card=model_card,
                 sharding=Sharding.Pipeline,
                 instance_meta=InstanceMeta.MlxRing,

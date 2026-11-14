@@ -1,25 +1,17 @@
 # pyright: reportUnusedImport = false
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping, Sequence, Set
 
-from exo.shared.types.chunks import InputImageChunk
-from exo.shared.types.common import CommandId, ModelId, NodeId
+from exo.shared.types.common import ModelId, NodeId
 from exo.shared.types.tasks import (
-    CancelTask,
     ConnectToGroup,
     CreateRunner,
     DownloadModel,
-    ImageEdits,
-    ImageGeneration,
     LoadModel,
     Shutdown,
     StartWarmup,
     Task,
-    TaskId,
-    TaskStatus,
-    TextGeneration,
 )
-from exo.shared.types.text_generation import Base64Image, Base64ImageHash
 from exo.shared.types.worker.downloads import (
     DownloadCompleted,
     DownloadFailed,
@@ -37,6 +29,7 @@ from exo.shared.types.worker.runners import (
     RunnerLoading,
     RunnerReady,
     RunnerRunning,
+    RunnerShuttingDown,
     RunnerStatus,
     RunnerWarmingUp,
 )
@@ -51,24 +44,72 @@ def plan(
     global_download_status: Mapping[NodeId, Sequence[DownloadProgress]],
     instances: Mapping[InstanceId, Instance],
     all_runners: Mapping[RunnerId, RunnerStatus],  # all global
-    tasks: Mapping[TaskId, Task],
-    input_chunk_buffer: Mapping[CommandId, Mapping[int, InputImageChunk]],
-    image_cache: Mapping[Base64ImageHash, Base64Image],
     instance_backoff: KeyedBackoff[InstanceId],
     download_backoff: KeyedBackoff[ModelId],
+    failed_download_backoff: KeyedBackoff[InstanceId] | None = None,
+    # This node's runners whose process has exited, but whose last report (that they are
+    # going) has yet to come back in `all_runners`
+    exits_in_flight: Set[RunnerId] = frozenset(),
 ) -> Task | None:
-    # Python short circuiting OR logic should evaluate these sequentially.
+    # A runner that is going (stopped, failed or exited) is left alone until its process has
+    # exited and the worker forgets it; only then can it be replaced.
+    live = {
+        runner_id: runner
+        for runner_id, runner in runners.items()
+        if not runner.stopping
+    }
+    # A runner that has yet to pick up the last task sent to it still has the status from
+    # before that task: starting the next phase from it would send the task again. Such a
+    # runner sits out those steps until it does (or until it's found stuck and stopped), and
+    # the other runners on this node carry on.
+    settled = {
+        runner_id: runner
+        for runner_id, runner in live.items()
+        if not runner.awaiting_acknowledgement
+    }
+    # Python short circuiting OR logic should evaluate these sequentially. Requests aren't
+    # planned here: the API nodes hand them to the runners directly (exo.worker.serving).
     return (
-        _cancel_tasks(runners, tasks)
-        or _kill_runner(runners, all_runners, instances)
-        or _create_runner(node_id, runners, all_runners, instances, instance_backoff)
-        or _model_needs_download(
-            node_id, runners, global_download_status, download_backoff
+        _kill_runner(live, all_runners, instances)
+        or _create_runner(
+            node_id, runners, all_runners, instances, instance_backoff, exits_in_flight
         )
-        or _init_distributed_backend(runners, all_runners)
-        or _load_model(runners, all_runners, global_download_status)
-        or _ready_to_warmup(runners, all_runners)
-        or _pending_tasks(runners, tasks, all_runners, input_chunk_buffer, image_cache)
+        or _model_needs_download(
+            node_id,
+            live,
+            global_download_status,
+            download_backoff,
+            failed_download_backoff or KeyedBackoff(),
+        )
+        or _init_distributed_backend(settled, all_runners)
+        or _load_model(settled, all_runners, global_download_status)
+        or _ready_to_warmup(settled, all_runners)
+    )
+
+
+# A runner that has joined, or is joining, its instance's other runners: it is tied to the
+# processes it connects with, and it is no use once any of them is gone
+_JOINED = (
+    RunnerConnecting,
+    RunnerConnected,
+    RunnerLoading,
+    RunnerLoaded,
+    RunnerWarmingUp,
+    RunnerReady,
+    RunnerRunning,
+)
+# A runner on its way out: it isn't coming back, and is replaced by a new one
+_GOING = (RunnerFailed, RunnerShuttingDown)
+
+
+def joined_to(runner: RunnerSupervisor, peer: RunnerId) -> bool:
+    """Whether `runner` has joined the other runner `peer` of its instance, so that it must go
+    when `peer` goes."""
+    return (
+        not runner.stopping
+        and isinstance(runner.status, _JOINED)
+        and peer != runner.bound_instance.bound_runner_id
+        and peer in runner.bound_instance.instance.shard_assignments.runner_to_shard
     )
 
 
@@ -77,27 +118,19 @@ def _kill_runner(
     all_runners: Mapping[RunnerId, RunnerStatus],
     instances: Mapping[InstanceId, Instance],
 ) -> Shutdown | None:
+    """Stop a runner whose instance is gone, or that has joined runners of its instance
+    of which one is going, or was seen going (`peer_went`). A runner that failed stops
+    itself. An idle runner is tied to no other: it waits for the others' replacements."""
     for runner in runners.values():
         runner_id = runner.bound_instance.bound_runner_id
-        if (instance_id := runner.bound_instance.instance.instance_id) not in instances:
+        instance_id = runner.bound_instance.instance.instance_id
+        if instance_id not in instances:
             return Shutdown(instance_id=instance_id, runner_id=runner_id)
-        if isinstance(runner.status, RunnerFailed):
-            return Shutdown(
-                instance_id=runner.bound_instance.instance.instance_id,
-                runner_id=runner_id,
-            )
-
-        for (
-            global_runner_id
-        ) in runner.bound_instance.instance.shard_assignments.node_to_runner.values():
-            if runner_id == global_runner_id:
-                continue
-
-            if isinstance(all_runners.get(global_runner_id, None), RunnerFailed):
-                return Shutdown(
-                    instance_id=instance_id,
-                    runner_id=runner_id,
-                )
+        if runner.peer_went or any(
+            joined_to(runner, peer) and isinstance(all_runners.get(peer), _GOING)
+            for peer in runner.bound_instance.instance.shard_assignments.node_to_runner.values()
+        ):
+            return Shutdown(instance_id=instance_id, runner_id=runner_id)
 
 
 def _create_runner(
@@ -106,6 +139,7 @@ def _create_runner(
     all_runners: Mapping[RunnerId, RunnerStatus],
     instances: Mapping[InstanceId, Instance],
     instance_backoff: KeyedBackoff[InstanceId],
+    exits_in_flight: Set[RunnerId],
 ) -> CreateRunner | None:
     for instance in instances.values():
         runner_id = instance.shard_assignments.node_to_runner.get(node_id, None)
@@ -115,14 +149,20 @@ def _create_runner(
         if runner_id in runners:
             continue
 
-        # don't create runners if any other nodes have runners that have failed - wait for them to fix themselves first.
-        instance_has_failed_runner = any(
-            isinstance(all_runners.get(remote_runner_id), RunnerFailed)
-            for remote_runner_id in instance.shard_assignments.node_to_runner.values()
-            if remote_runner_id != runner_id
-        )
-        we_have_failed_before = isinstance(all_runners.get(runner_id), RunnerFailed)
-        if instance_has_failed_runner and not we_have_failed_before:
+        # Until this node's last report on the runner it replaces is back in its copy of the
+        # state, that copy can still hold what the old process last said (Idle, Connecting):
+        # this plan, and the other nodes', would take it for the new runner's.
+        if runner_id in exits_in_flight:
+            continue
+
+        # A runner of the instance that has joined others is tied to this runner's last
+        # process, which is gone: wait until it is going too, so that the new runner can
+        # never pair with it.
+        if any(
+            isinstance(all_runners.get(peer), _JOINED)
+            for peer in instance.shard_assignments.node_to_runner.values()
+            if peer != runner_id
+        ):
             continue
 
         if not instance_backoff.should_proceed(instance.instance_id):
@@ -141,26 +181,37 @@ def _model_needs_download(
     runners: Mapping[RunnerId, RunnerSupervisor],
     global_download_status: Mapping[NodeId, Sequence[DownloadProgress]],
     download_backoff: KeyedBackoff[ModelId],
+    failed_download_backoff: KeyedBackoff[InstanceId],
 ) -> DownloadModel | None:
+    """Ask for the model of each local runner that hasn't loaded it, until it is
+    downloaded.
+
+    That includes runners already connecting to the rest of their instance (a
+    multi-node instance connects before its downloads finish). A download that
+    isn't running (never started, stopped, or failed) is asked for again; a failed
+    one with a slower backoff, kept per instance, so a new instance asks at once.
+    Models no instance on this node needs are never asked for.
+    """
     local_downloads = global_download_status.get(node_id, [])
     download_status = {
         dp.shard_metadata.model_card.model_id: dp for dp in local_downloads
     }
 
     for runner in runners.values():
-        model_id = runner.bound_instance.bound_shard.model_card.model_id
-        if (
-            isinstance(runner.status, RunnerIdle)
-            and (
-                model_id not in download_status
-                or not isinstance(
-                    download_status[model_id],
-                    (DownloadOngoing, DownloadCompleted, DownloadFailed),
-                )
-            )
-            and download_backoff.should_proceed(model_id)
+        if not isinstance(
+            runner.status, (RunnerIdle, RunnerConnecting, RunnerConnected)
         ):
-            # We don't invalidate download_status randomly in case a file gets deleted on disk
+            continue  # loading or past it: the model is on disk
+        model_id = runner.bound_instance.bound_shard.model_card.model_id
+        instance_id = runner.bound_instance.instance.instance_id
+        status = download_status.get(model_id)
+        if isinstance(status, (DownloadOngoing, DownloadCompleted)):
+            continue
+        if (
+            failed_download_backoff.should_proceed(instance_id)
+            if isinstance(status, DownloadFailed)
+            else download_backoff.should_proceed(model_id)
+        ):
             return DownloadModel(
                 instance_id=runner.bound_instance.instance.instance_id,
                 shard_metadata=runner.bound_instance.bound_shard,
@@ -295,68 +346,3 @@ def _ready_to_warmup(
             return StartWarmup(instance_id=instance.instance_id)
 
     return None
-
-
-def _pending_tasks(
-    runners: Mapping[RunnerId, RunnerSupervisor],
-    tasks: Mapping[TaskId, Task],
-    all_runners: Mapping[RunnerId, RunnerStatus],
-    input_chunk_buffer: Mapping[CommandId, Mapping[int, InputImageChunk]],
-    image_cache: Mapping[Base64ImageHash, Base64Image],
-) -> Task | None:
-    for task in tasks.values():
-        # for now, just forward chat completions
-        # TODO(ciaran): do this better!
-        if not isinstance(task, (TextGeneration, ImageGeneration, ImageEdits)):
-            continue
-        if task.task_status not in (TaskStatus.Pending, TaskStatus.Running):
-            continue
-
-        if isinstance(task, ImageEdits) and task.task_params.total_input_chunks > 0:
-            received = len(input_chunk_buffer.get(task.command_id, {}))
-            if received < task.task_params.total_input_chunks:
-                continue  # Wait for all chunks to arrive
-
-        if (
-            isinstance(task, TextGeneration)
-            and task.task_params.image_hashes
-            and not all(
-                h in image_cache for h in task.task_params.image_hashes.values()
-            )
-        ):
-            continue  # Wait for all images to be assembled into the cache
-
-        for runner in runners.values():
-            if task.instance_id != runner.bound_instance.instance.instance_id:
-                continue
-
-            # the task status _should_ be set to completed by the LAST runner
-            # it is currently set by the first
-            # this is definitely a hack
-            if task.task_id in runner.completed or task.task_id in runner.in_progress:
-                continue
-
-            if isinstance(runner.status, (RunnerReady, RunnerRunning)) and all(
-                isinstance(all_runners[global_runner_id], (RunnerReady, RunnerRunning))
-                for global_runner_id in runner.bound_instance.instance.shard_assignments.runner_to_shard
-            ):
-                return task
-
-
-def _cancel_tasks(
-    runners: Mapping[RunnerId, RunnerSupervisor],
-    tasks: Mapping[TaskId, Task],
-) -> Task | None:
-    for task in tasks.values():
-        if task.task_status != TaskStatus.Cancelled:
-            continue
-        for runner_id, runner in runners.items():
-            if task.instance_id != runner.bound_instance.instance.instance_id:
-                continue
-            if task.task_id in runner.cancelled:
-                continue
-            return CancelTask(
-                instance_id=task.instance_id,
-                cancelled_task_id=task.task_id,
-                runner_id=runner_id,
-            )

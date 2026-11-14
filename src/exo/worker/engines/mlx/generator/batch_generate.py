@@ -41,6 +41,7 @@ from exo.worker.engines.mlx.generator.generate import (
     prefill,
 )
 from exo.worker.engines.mlx.generator.remote_prefill import remote_prefill
+from exo.worker.engines.mlx.models.registry import keeps_think_tags, model_type_of
 from exo.worker.engines.mlx.patches.opt_batch_gen import (
     set_needs_topk,
     take_ready_topk,
@@ -57,6 +58,7 @@ from exo.worker.engines.mlx.vision import (
     prepare_vision,
 )
 from exo.worker.runner.bootstrap import logger
+from exo.worker.runner.context_length import check_context_length
 
 _MIN_PREFIX_HIT_RATIO_TO_UPDATE = 0.5
 REMOTE_PREFILL_MIN_TOKENS = 1000
@@ -97,6 +99,8 @@ class ExoBatchGenerator:
     group: mx.distributed.Group | None
     kv_prefix_cache: KVPrefixCache | None
     vision_processor: VisionProcessor | None = None
+    # The longest context the model takes; 0 if unknown
+    context_length: int = 0
 
     _mlx_gen: MlxBatchGenerator = field(init=False)
     _active_tasks: dict[int, _EngineTask] = field(default_factory=dict, init=False)
@@ -108,6 +112,8 @@ class ExoBatchGenerator:
             prefill_step_size=4096,
         )
         self._step_count = 0
+        # Cancelled sequences left to finish at their next step
+        self._finishing: set[int] = set()
 
     @property
     def has_work(self) -> bool:
@@ -127,9 +133,10 @@ class ExoBatchGenerator:
         on_generation_token: Callable[[], None] | None = None,
     ) -> int:
         all_prompt_tokens = encode_prompt(self.tokenizer, prompt)
-        all_prompt_tokens = fix_unmatched_think_end_tokens(
-            all_prompt_tokens, self.tokenizer
-        )
+        if not keeps_think_tags(task_params, model_type_of(self.model)):
+            all_prompt_tokens = fix_unmatched_think_end_tokens(
+                all_prompt_tokens, self.tokenizer
+            )
 
         vision: VisionResult | None = None
         media_regions: list[MediaRegion] = []
@@ -153,6 +160,10 @@ class ExoBatchGenerator:
         if vision is not None:
             all_prompt_tokens = vision.prompt_tokens
             media_regions = vision.media_regions
+        # Before any work on a request the model can't take (and any collective)
+        check_context_length(
+            len(all_prompt_tokens), task_params.max_output_tokens, self.context_length
+        )
 
         is_bench = task_params.bench
 
@@ -344,6 +355,10 @@ class ExoBatchGenerator:
         results: list[tuple[int, GenerationResponse]] = []
 
         for response in responses:
+            if response.uid in self._finishing:
+                if response.finish_reason is not None:
+                    self._finishing.discard(response.uid)
+                continue
             if response.uid not in self._active_tasks:
                 logger.warning(
                     f"response uid {response.uid} was not found - should be active"
@@ -482,7 +497,19 @@ class ExoBatchGenerator:
         return results
 
     def cancel(self, uids: list[int]) -> None:
-        self._mlx_gen.remove(uids)
+        # A sequence that is generating is finished by mlx_lm at its next step, as if it had
+        # reached its token limit, instead of being removed from the batch here. Removing it
+        # between steps deadlocked pipeline-parallel instances; finishing is the path every
+        # completed request takes. Its last token is discarded.
+        generation_batch = self._mlx_gen._generation_batch
+        generating = {uid: i for i, uid in enumerate(generation_batch.uids)}
+        for uid in uids:
+            if uid in generating:
+                generation_batch.max_tokens[generating[uid]] = 0
+                self._finishing.add(uid)
+        waiting = [uid for uid in uids if uid not in generating]
+        if waiting:
+            self._mlx_gen.remove(waiting)
         for uid in uids:
             self._active_tasks.pop(uid, None)
 

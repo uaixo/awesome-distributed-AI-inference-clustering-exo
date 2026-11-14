@@ -1,4 +1,4 @@
-"""Tests that delete_model refuses a model id that is a path reference, not a name.
+"""Tests that deleting a model refuses a model id that is a path reference, not a name.
 
 `ModelId.parse` rejects these where payloads are deserialised. This covers the
 second layer: a caller inside the process that builds `ModelId` directly still
@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 import pytest
 
-from exo.download.download_utils import delete_model, model_dir_name
+from exo.download import store
 from exo.shared.types.common import ModelId
 
 
@@ -26,20 +26,20 @@ def models_dir(tmp_path: Path) -> Path:
 
 
 @pytest.mark.parametrize("value", [".", ".."])
-async def test_path_references_delete_nothing(value: str, models_dir: Path) -> None:
+def test_path_references_delete_nothing(value: str, models_dir: Path) -> None:
     """`..` resolved to the models directory's parent, taking node_zid with it."""
     with (
-        patch("exo.download.download_utils.EXO_MODELS_DIRS", (models_dir,)),
-        patch("exo.download.download_utils.EXO_DEFAULT_MODELS_DIR", models_dir),
-        pytest.raises(ValueError, match="not a directory name"),
+        patch.object(store, "EXO_MODELS_DIRS", (models_dir,)),
+        patch.object(store, "EXO_DEFAULT_MODELS_DIR", models_dir),
+        pytest.raises(ValueError, match="not a valid model id"),
     ):
-        _ = await delete_model(ModelId(value))
+        _ = store.delete(ModelId(value))
 
     assert (models_dir / "test-org--test-model" / "weights.safetensors").exists()
     assert (models_dir.parent / "node_zid").exists()
 
 
-async def test_multi_segment_traversal_stays_inside_the_models_directory(
+def test_multi_segment_traversal_stays_inside_the_models_directory(
     models_dir: Path,
 ) -> None:
     """`normalize` rewrites the separator, so `../..` becomes the literal name `..--..`.
@@ -48,27 +48,27 @@ async def test_multi_segment_traversal_stays_inside_the_models_directory(
     the guard checks for exactly those two.
     """
     with (
-        patch("exo.download.download_utils.EXO_MODELS_DIRS", (models_dir,)),
-        patch("exo.download.download_utils.EXO_DEFAULT_MODELS_DIR", models_dir),
+        patch.object(store, "EXO_MODELS_DIRS", (models_dir,)),
+        patch.object(store, "EXO_DEFAULT_MODELS_DIR", models_dir),
     ):
-        assert await delete_model(ModelId("../..")) is False
+        assert store.delete(ModelId("../..")) is False
 
     assert (models_dir / "test-org--test-model" / "weights.safetensors").exists()
     assert (models_dir.parent / "node_zid").exists()
 
 
-async def test_a_real_model_is_still_deleted(models_dir: Path) -> None:
+def test_a_real_model_is_still_deleted(models_dir: Path) -> None:
     """The guard must not stand between an operator and an actual delete."""
     with (
-        patch("exo.download.download_utils.EXO_MODELS_DIRS", (models_dir,)),
-        patch("exo.download.download_utils.EXO_DEFAULT_MODELS_DIR", models_dir),
+        patch.object(store, "EXO_MODELS_DIRS", (models_dir,)),
+        patch.object(store, "EXO_DEFAULT_MODELS_DIR", models_dir),
     ):
-        assert await delete_model(ModelId("test-org/test-model")) is True
+        assert store.delete(ModelId("test-org/test-model")) is True
 
     assert not (models_dir / "test-org--test-model").exists()
     assert (models_dir.parent / "node_zid").exists()
 
 
-def test_model_dir_name_passes_a_real_id_through() -> None:
+def test_a_real_id_becomes_a_single_directory_name() -> None:
     """The owner separator becomes the single directory name the download code uses."""
-    assert model_dir_name(ModelId("mlx-community/Qwen3")) == "mlx-community--Qwen3"
+    assert ModelId("mlx-community/Qwen3").normalize() == "mlx-community--Qwen3"

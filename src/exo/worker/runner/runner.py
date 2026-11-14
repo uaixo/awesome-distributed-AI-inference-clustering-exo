@@ -12,7 +12,7 @@ from exo.shared.types.chunks import Chunk
 from exo.shared.types.common import CommandId
 from exo.shared.types.events import (
     ChunkGenerated,
-    Event,
+    RunnerEvent,
     RunnerStatusUpdated,
     TaskAcknowledged,
     TaskStatusUpdated,
@@ -86,7 +86,7 @@ class Runner:
         self,
         bound_instance: BoundInstance,
         builder: Builder,
-        event_sender: MpSender[Event],
+        event_sender: MpSender[RunnerEvent],
         task_receiver: MpReceiver[Task],
     ):
         self.event_sender = event_sender
@@ -318,8 +318,12 @@ class Runner:
         import gc
 
         gc.collect()
-        self.send_task_status(task.task_id, TaskStatus.Complete)
-        self.update_status(RunnerShutdown())
+        try:
+            self.send_task_status(task.task_id, TaskStatus.Complete)
+            self.update_status(RunnerShutdown())
+        except ClosedResourceError:
+            # The supervisor stops listening as soon as it has the acknowledgement
+            self.current_status = RunnerShutdown()
 
     def submit_generation(self, task: GenerationTask):
         assert isinstance(self.generator, Engine)
@@ -345,6 +349,9 @@ class Runner:
             for task_id, result in results:
                 match result:
                     case CancelledResponse():
+                        # Said once, so the supervisor can forget the request
+                        if task_id in self.active_tasks:
+                            self.send_task_status(task_id, TaskStatus.Cancelled)
                         finished.append(task_id)
                     case FinishedResponse():
                         self.send_task_status(task_id, TaskStatus.Complete)

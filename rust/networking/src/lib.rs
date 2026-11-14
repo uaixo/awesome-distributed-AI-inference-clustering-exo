@@ -2,15 +2,16 @@ use std::sync::Arc;
 
 use tokio::task::JoinHandle;
 use zenoh::{Result, Session as ZSession, config::Locator};
-use zenoh_plugin_storage_manager::StoragesPlugin;
-use zenoh_plugin_trait::PluginsManager;
 
 pub use zenoh::{Config, config::ZenohId};
 
 use crate::discovery::Discovery;
+use crate::wire::{ClusterKey, OtherVersions};
 
 pub mod discovery;
+pub mod membership;
 pub mod swarm;
+pub mod wire;
 
 pub fn is_valid_zid(identity: &str) -> bool {
     let mut iter = identity.chars();
@@ -35,44 +36,43 @@ pub fn cfg(identity: &str, listen_port: u16) -> Result<zenoh::Config> {
     cfg.insert_json5("adminspace/enabled", "true")?;
     //cfg.insert_json5("transport/link/tx/batch_size", "9216")?;
     cfg.insert_json5("transport/link/rx/buffer_size", "16777216")?;
-    //cfg.insert_json5("timestamping/enabled", "true")?;
-    cfg.insert_json5("plugins/storage_manager/__required__", "true")?;
+    // How long a silent connection is kept (see `membership::LEASE`)
     cfg.insert_json5(
-        "plugins/storage_manager/storages/mem1",
-        r#"{
-            key_expr: "storage/mem1/**",
-            strip_prefix: "storage/mem1",
-            volume: "memory",
-            replication: {
-                interval: 2,
-            }
-        }"#,
+        "transport/link/tx/lease",
+        &membership::LEASE.as_millis().to_string(),
     )?;
+    //cfg.insert_json5("timestamping/enabled", "true")?;
     Ok(cfg)
 }
 
+/// Opens this node's session. It connects only to nodes with the same `namespace`,
+/// `wire_version` (exo's WIRE_VERSION) and `build_id`: see `wire`. Exos from before wire
+/// versions are recognised under `namespace`, and under `pre_gate_namespace` if given.
 pub async fn open(
     cfg: zenoh::Config,
     namespace: &str,
+    wire_version: u16,
+    build_id: &str,
+    pre_gate_namespace: Option<&str>,
     listen_port: u16,
     discovery_service_port: u16,
 ) -> Result<Session> {
     assert!(listen_port != 0, "must used defined listen port");
-    let namespace: [u8; 8] = {
-        blake3::hash(namespace.as_bytes()).as_bytes()[..8]
-            .try_into()
-            .expect("8 is equal to 8")
-    };
-    let mut plugins = PluginsManager::static_plugins_only();
-    plugins.declare_static_plugin::<StoragesPlugin, _>("storage_manager", true);
+    let cluster = ClusterKey::new(namespace, wire_version, build_id, pre_gate_namespace);
+    let other_versions = OtherVersions::default();
     let mut runtime = zenoh::internal::runtime::RuntimeBuilder::new(cfg)
-        .plugins_manager(plugins)
         .build()
         .await?;
     let z = zenoh::session::init(runtime.clone().into()).await?;
     runtime.start().await?;
-    let mut discovery =
-        Discovery::new(z.zid(), namespace, listen_port, discovery_service_port).await?;
+    let mut discovery = Discovery::new(
+        z.zid(),
+        cluster,
+        other_versions.clone(),
+        listen_port,
+        discovery_service_port,
+    )
+    .await?;
     let _jh = Arc::new(AbortOnDrop(tokio::task::spawn(async move {
         loop {
             let Ok(discovered) = discovery.next().await.inspect_err(|e| {
@@ -94,12 +94,22 @@ pub async fn open(
                 continue;
             };
 
-            runtime
-                .connect_peer(&discovered.zid.into(), &[locator])
-                .await;
+            // Don't wait for the connection here: a slow dial would stall discovery
+            // (and look like this node stalling). zenoh ignores dials to a peer it is
+            // already connecting to.
+            let runtime = runtime.clone();
+            tokio::task::spawn(async move {
+                runtime
+                    .connect_peer(&discovered.zid.into(), &[locator])
+                    .await;
+            });
         }
     })));
-    Ok(Session { z, _jh })
+    Ok(Session {
+        z,
+        other_versions,
+        _jh,
+    })
 }
 
 struct AbortOnDrop(JoinHandle<()>);
@@ -112,5 +122,34 @@ impl Drop for AbortOnDrop {
 #[derive(Clone)]
 pub struct Session {
     pub z: ZSession,
+    /// Devices discovery hears in this namespace that can't join: another wire version or
+    /// build, or an exo from before wire versions.
+    pub other_versions: OtherVersions,
     _jh: Arc<AbortOnDrop>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_lease_is_the_one_membership_times_from() {
+        let cfg = cfg("1f", 52414).expect("config");
+        // The setting zenoh's transport reads its lease from
+        let lease = *cfg.transport().link().tx().lease();
+        assert_eq!(
+            u128::from(lease),
+            membership::LEASE.as_millis(),
+            "zenoh's lease, in ms"
+        );
+    }
+
+    /// exo uses zenoh for pub/sub and liveliness only. A plugin marked required that fails to
+    /// start makes zenoh panic, taking the whole node down, so none is configured.
+    #[test]
+    fn the_session_config_has_no_plugins() {
+        let config = cfg("1234abcd", 52414).expect("a valid config");
+        let plugins = config.get_json("plugins").expect("plugins is a config key");
+        assert_eq!(plugins, "{}");
+    }
 }

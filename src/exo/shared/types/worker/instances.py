@@ -1,15 +1,30 @@
 from enum import Enum
+from typing import Literal
 
-from pydantic import model_validator
+from pydantic import Field, model_validator
 
 from exo.shared.models.model_cards import ModelTask
-from exo.shared.types.common import Host, Id, NodeId
+from exo.shared.types.common import DeploymentId, Host, Id, NodeId
 from exo.shared.types.worker.runners import RunnerId, ShardAssignments, ShardMetadata
 from exo.utils.pydantic_ext import FrozenModel, TaggedModel
 
 
 class InstanceId(Id):
     pass
+
+
+# Why a worker can't run an instance any more: its runner kept failing to start
+BrokenInstanceReason = Literal["StartFailed"]
+
+# Why an instance was removed. Every removal says which, so nothing has to guess: a request the
+# removal ends is told why, and only a user's stop means the user no longer wants the model.
+# NodeLost: one of its nodes left the cluster, or the master stopped hearing from it.
+# NodeLeft: one of its nodes announced that it was quitting.
+# UserStopped: a user stopped it.
+# Duplicate: its deployment had another instance (a launch crossed a re-placement).
+InstanceRemovalReason = (
+    Literal["NodeLost", "NodeLeft", "UserStopped", "Duplicate"] | BrokenInstanceReason
+)
 
 
 class InstanceMeta(str, Enum):
@@ -20,6 +35,9 @@ class InstanceMeta(str, Enum):
 class BaseInstance(TaggedModel):
     instance_id: InstanceId
     shard_assignments: ShardAssignments
+    # The deployment it runs. The master sets it when it places a deployment; an instance
+    # built elsewhere (a placement preview) gets a fresh one, which the API replaces
+    deployment_id: DeploymentId = Field(default_factory=DeploymentId)
 
     def shard(self, runner_id: RunnerId) -> ShardMetadata | None:
         return self.shard_assignments.runner_to_shard.get(runner_id, None)

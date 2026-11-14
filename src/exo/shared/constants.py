@@ -67,19 +67,15 @@ _RESOURCES_DIR_ENV = os.environ.get("EXO_RESOURCES_DIR", None)
 RESOURCES_DIR = (
     find_resources() if _RESOURCES_DIR_ENV is None else Path.home() / _RESOURCES_DIR_ENV
 )
+_DASHBOARD_DIR_ENV = os.environ.get("EXO_DASHBOARD_DIR", None)
 
 
 def dashboard_dir() -> Path:
-    """Locate the built dashboard assets, honouring EXO_DASHBOARD_DIR.
-
-    Resolved on call rather than at import, because `find_dashboard` raises when
-    the build is absent and importing this module must not require it: a fresh
-    checkout has no `dashboard/build` until `npm run build` has been run.
-    """
-    dashboard_dir_env = os.environ.get("EXO_DASHBOARD_DIR", None)
-    if dashboard_dir_env is None:
-        return find_dashboard()
-    return Path.home() / dashboard_dir_env
+    """The built dashboard. Looked up only when it's served, so exo --help and --version work
+    before the dashboard is built."""
+    if _DASHBOARD_DIR_ENV is not None:
+        return Path.home() / _DASHBOARD_DIR_ENV
+    return find_dashboard()
 
 
 # Log files (data/logs or cache)
@@ -95,6 +91,8 @@ EXO_PID_FILE = EXO_CACHE_HOME / "exo.pid"
 # Identity (config)
 EXO_NODE_ZID = EXO_CACHE_HOME / "node_zid"
 EXO_CONFIG_FILE = EXO_CONFIG_HOME / "config.toml"
+# The models users launched and stopped, as this node knows them (exo.shared.deployment_store)
+EXO_DEPLOYMENTS_FILE = EXO_DATA_HOME / "deployments.json"
 
 # libp2p topics for event forwarding
 LIBP2P_LOCAL_EVENTS_TOPIC = "worker_events"

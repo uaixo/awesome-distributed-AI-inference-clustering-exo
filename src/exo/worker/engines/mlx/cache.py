@@ -1,10 +1,11 @@
 import gc
 import os
 from copy import deepcopy
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import mlx.core as mx
 import numpy as np
+import numpy.typing as npt
 import psutil
 from mlx_lm.models.cache import (
     ArraysCache,
@@ -13,17 +14,16 @@ from mlx_lm.models.cache import (
     QuantizedKVCache,
     RotatingKVCache,
 )
-from mlx_lm.models.deepseek_v4 import (
-    DeepseekV4Cache,
-)
-from mlx_lm.models.deepseek_v4 import (
-    _CompressorBranch as CompressorBranch,  # type: ignore
-)
 from mlx_lm.tokenizer_utils import TokenizerWrapper
 
 from exo.shared.types.memory import Memory
+from exo.worker.engines.mlx.cache_copy import copy_rotating_kv_cache, detached_copy
 from exo.worker.engines.mlx.constants import CACHE_GROUP_SIZE, KV_CACHE_BITS
-from exo.worker.engines.mlx.types import KVCacheType, Model
+from exo.worker.engines.mlx.models.deepseek_v4.cache import copy_deepseek_v4_cache
+from exo.worker.engines.mlx.models.deepseek_v4.model import (
+    DeepseekV4Cache,
+)
+from exo.worker.engines.mlx.types import KVCacheType, Model, SnapshotCache
 from exo.worker.runner.bootstrap import logger
 
 if TYPE_CHECKING:
@@ -47,6 +47,17 @@ _MEMORY_THRESHOLD = float(
     os.environ.get("EXO_MEMORY_THRESHOLD", _default_memory_threshold())
 )
 
+# Limits on the prefix cache besides memory pressure. Every request adds an entry (its whole
+# KV and state cache: about 150 MB for a 27B hybrid model), and memory pressure only starts
+# evicting at 70-85% of RAM: a node that had cached ~300 entries in half an hour generated at
+# a third of its starting speed.
+_MAX_ENTRIES = int(os.environ.get("EXO_PREFIX_CACHE_MAX_ENTRIES", "64"))
+_MAX_BYTES = int(
+    os.environ.get(
+        "EXO_PREFIX_CACHE_MAX_BYTES", str(psutil.virtual_memory().total // 10)
+    )
+)
+
 
 class CacheSnapshot:
     """Snapshot of states at a known token position."""
@@ -54,7 +65,12 @@ class CacheSnapshot:
     def __init__(
         self,
         states: list[
-            RotatingKVCache | ArraysCache | CacheList | DeepseekV4Cache | None
+            RotatingKVCache
+            | ArraysCache
+            | CacheList
+            | DeepseekV4Cache
+            | SnapshotCache
+            | None
         ],
         token_count: int,
     ):
@@ -62,47 +78,16 @@ class CacheSnapshot:
         self.token_count = token_count
 
 
-def _detached_copy(a: mx.array) -> mx.array:
-    dtype = a.dtype
-    if dtype == mx.bfloat16:
-        return mx.array(np.array(a.astype(mx.float32))).astype(mx.bfloat16)
-    return mx.array(np.array(a))
-
-
-def copy_rotating_kv_cache(cache: RotatingKVCache) -> RotatingKVCache | None:
-    """
-    Deepcopy copies the metadata associated with an mx array.
-    Specifically, it shares a shared_ptr to the underlying data and
-    the mlx graph inputs of the array. This causes a memory leak for rotating
-    kv cache. By creating an np array, no metadata is stored so the old cache
-    can be cleaned up nicely.
-    """
-    if cache.keys is None or cache.values is None:
-        return None
-    n = min(cache.max_size, cache.keys.shape[2])
-    k_slice = _detached_copy(cache.keys[..., -n:, :])
-    v_slice = _detached_copy(cache.values[..., -n:, :])
-    mx.eval(k_slice, v_slice)
-    snap = RotatingKVCache.__new__(RotatingKVCache)
-    snap.keys = k_slice
-    snap.values = v_slice
-    snap.offset = cache.offset
-    snap._idx = n
-    snap.keep = cache.keep
-    snap.max_size = cache.max_size
-    return snap
-
-
 def _copy_arrays_cache(ac: ArraysCache) -> ArraysCache:
     entries: list[mx.array | None] = []
-    for entry in ac.cache:  # type: ignore[reportUnknownMemberType]
+    for entry in ac.cache:
         if entry is None:
             entries.append(None)
             continue
         assert isinstance(entry, mx.array)
-        entries.append(_detached_copy(entry))
+        entries.append(detached_copy(entry))
     copy = ArraysCache(len(entries))
-    copy.cache = entries  # type: ignore[reportUnknownMemberType]
+    copy.cache = entries
     return copy
 
 
@@ -120,53 +105,14 @@ def _copy_cache_list(cl: CacheList) -> CacheList:
     return CacheList(*copied)
 
 
-def _detached_copy_or_none(a: mx.array | None) -> mx.array | None:
-    if a is None:
-        return None
-    out = _detached_copy(a)
-    mx.eval(out)
-    return out
-
-
-def _copy_compressor_branch(b: CompressorBranch) -> CompressorBranch:
-    out = CompressorBranch.__new__(CompressorBranch)
-    out.buffer_kv = _detached_copy_or_none(b.buffer_kv)
-    out.buffer_gate = _detached_copy_or_none(b.buffer_gate)
-    out.prev_kv = _detached_copy_or_none(b.prev_kv)
-    out.prev_gate = _detached_copy_or_none(b.prev_gate)
-    out.pool = _detached_copy_or_none(b.pool)
-    out.buffer_lengths = deepcopy(b.buffer_lengths)
-    out.pool_lengths = deepcopy(b.pool_lengths)
-    out.buffer_count = deepcopy(b.buffer_count)
-    out._new_pool_lengths = deepcopy(b._new_pool_lengths)
-    return out
-
-
-def _copy_v4_cache(c: DeepseekV4Cache) -> DeepseekV4Cache:
-    snap = DeepseekV4Cache.__new__(DeepseekV4Cache)
-
-    local: RotatingKVCache = c.local
-    local_snap = copy_rotating_kv_cache(local)
-    if local_snap is None:
-        local_snap = RotatingKVCache.__new__(RotatingKVCache)
-        local_snap.keys = None
-        local_snap.values = None
-        local_snap.offset = local.offset
-        local_snap._idx = 0
-        local_snap.keep = local.keep
-        local_snap.max_size = local.max_size
-    snap.local = local_snap
-
-    snap._branches = {
-        key: _copy_compressor_branch(branch) for key, branch in c._branches.items()
-    }
-    snap._pending_lengths = deepcopy(c._pending_lengths)
-    return snap
-
-
 def copy_snapshot_entry(
-    entry: ArraysCache | RotatingKVCache | CacheList | DeepseekV4Cache | None,
-) -> ArraysCache | RotatingKVCache | CacheList | DeepseekV4Cache | None:
+    entry: ArraysCache
+    | RotatingKVCache
+    | CacheList
+    | DeepseekV4Cache
+    | SnapshotCache
+    | None,
+) -> ArraysCache | RotatingKVCache | CacheList | DeepseekV4Cache | SnapshotCache | None:
     match entry:
         case None:
             return None
@@ -178,12 +124,19 @@ def copy_snapshot_entry(
         case CacheList():
             return _copy_cache_list(entry)
         case DeepseekV4Cache():
-            return _copy_v4_cache(entry)
+            return copy_deepseek_v4_cache(entry)
+        case SnapshotCache():
+            return entry.prefix_cache_snapshot()
 
 
 def snapshot_ssm_states(cache: KVCacheType) -> CacheSnapshot:
     states: list[
-        RotatingKVCache | ArraysCache | CacheList | DeepseekV4Cache | None
+        RotatingKVCache
+        | ArraysCache
+        | CacheList
+        | DeepseekV4Cache
+        | SnapshotCache
+        | None
     ] = []
     for c in cache:
         if isinstance(c, ArraysCache):
@@ -193,7 +146,9 @@ def snapshot_ssm_states(cache: KVCacheType) -> CacheSnapshot:
         elif isinstance(c, CacheList) and not bool(c.is_trimmable()):  # type: ignore[reportUnknownMemberType]
             states.append(_copy_cache_list(c))
         elif isinstance(c, DeepseekV4Cache):
-            states.append(_copy_v4_cache(c))
+            states.append(copy_deepseek_v4_cache(c))
+        elif isinstance(c, SnapshotCache):
+            states.append(c.prefix_cache_snapshot())
         else:
             states.append(None)
     token_count = cache_length(cache)
@@ -221,7 +176,7 @@ def is_non_trimmable_cache_entry(c: object) -> bool:
         return True
     if isinstance(c, CacheList):
         return not bool(c.is_trimmable())  # type: ignore[reportUnknownMemberType]
-    return isinstance(c, DeepseekV4Cache)
+    return isinstance(c, (DeepseekV4Cache, SnapshotCache))
 
 
 def has_non_kv_caches(cache: KVCacheType) -> bool:
@@ -236,6 +191,7 @@ class KVPrefixCache:
         self._snapshots: list[list[CacheSnapshot] | None] = []
         self._media_regions: list[list["MediaRegion"]] = []
         self._last_used: list[int] = []  # monotonic counter of last access per entry
+        self._entry_bytes: list[int] = []
         self.prefill_tps: list[float] = []
         self._access_counter: int = 0
         self._group = group
@@ -247,6 +203,7 @@ class KVPrefixCache:
         self._snapshots.clear()
         self._media_regions.clear()
         self._last_used.clear()
+        self._entry_bytes.clear()
         self.prefill_tps.clear()
 
     def add_kv_cache(
@@ -257,8 +214,9 @@ class KVPrefixCache:
         media_regions: list["MediaRegion"] | None = None,
         prefill_tps: float = 0.0,
     ):
-        """Add a new cache entry. Evicts LRU entries if memory is high."""
-        self._evict_if_needed()
+        """Add a new cache entry. Evicts LRU entries if memory is high or the cache is full."""
+        entry_bytes = _entry_nbytes(cache, ssm_snapshots)
+        self._evict_if_needed(entry_bytes)
         self.prompts.append(prompt_tokens)
         self.caches.append(deepcopy(cache))
         self._snapshots.append(ssm_snapshots)
@@ -266,6 +224,7 @@ class KVPrefixCache:
         self.prefill_tps.append(prefill_tps)
         self._access_counter += 1
         self._last_used.append(self._access_counter)
+        self._entry_bytes.append(entry_bytes)
         logger.info(f"KV cache added: {len(prompt_tokens)} tokens")
 
     def update_kv_cache(
@@ -293,6 +252,7 @@ class KVPrefixCache:
         self.prefill_tps[index] = prefill_tps
         self._access_counter += 1
         self._last_used[index] = self._access_counter
+        self._entry_bytes[index] = _entry_nbytes(cache, self._snapshots[index])
         logger.info(f"KV cache updated (index {index}): {len(prompt_tokens)} tokens")
 
     def _get_snapshot(
@@ -384,7 +344,7 @@ class KVPrefixCache:
             for c in prompt_cache:
                 if isinstance(c, (ArraysCache, RotatingKVCache)):
                     continue
-                if isinstance(c, DeepseekV4Cache):
+                if isinstance(c, (DeepseekV4Cache, SnapshotCache)):
                     continue
                 if hasattr(c, "offset"):
                     c.offset = restore_pos
@@ -426,17 +386,15 @@ class KVPrefixCache:
 
         return match_length
 
-    def _evict_if_needed(self):
-        """Evict least recently used entries while memory usage is high."""
+    def _evict_if_needed(self, incoming_bytes: int = 0):
+        """Evict least recently used entries while memory usage is high, or while adding
+        an entry of incoming_bytes would take the cache over its size limits."""
         if len(self.caches) == 0:
             return
 
         evicted_any = False
-        # Evict LRU entries until below threshold
-        while (
-            len(self.caches) > 0
-            and self.get_memory_used_percentage() > _MEMORY_THRESHOLD
-        ):
+        # Evict LRU entries until below the limits
+        while len(self.caches) > 0 and self._over_limit(incoming_bytes):
             lru_index = self._last_used.index(min(self._last_used))
             evicted_tokens = len(self.prompts[lru_index])
             self.prompts.pop(lru_index)
@@ -444,30 +402,60 @@ class KVPrefixCache:
             self._snapshots.pop(lru_index)
             self._media_regions.pop(lru_index)
             self._last_used.pop(lru_index)
+            self._entry_bytes.pop(lru_index)
             self.prefill_tps.pop(lru_index)
 
             evicted_any = True
-            logger.info(
-                f"KV cache evicted LRU entry ({evicted_tokens} tokens) due to memory usage"
-            )
+            logger.info(f"KV cache evicted LRU entry ({evicted_tokens} tokens)")
 
         if evicted_any:
             gc.collect()
             mx.clear_cache()
 
-    def get_memory_used_percentage(self) -> float:
+    def _over_limit(self, incoming_bytes: int) -> bool:
+        # The same on every rank: they all hold the same entries
+        if len(self.caches) >= _MAX_ENTRIES:
+            return True
+
+        over_budget = sum(self._entry_bytes) + incoming_bytes > _MAX_BYTES
         local_pressure: float = get_memory_used_percentage()
-
         if self._group is None:
-            return local_pressure
+            return over_budget or local_pressure > _MEMORY_THRESHOLD
 
-        all_pressure = mx.distributed.all_gather(
-            mx.array([local_pressure], dtype=mx.float32),
+        # A cache hit changes how much of a prompt each rank prefills, so every rank must
+        # evict the same entries: evict if any rank is under memory pressure or over its
+        # budget (each rank holds different layers, so their entries differ in size).
+        gathered = mx.distributed.all_gather(
+            mx.array([local_pressure, float(over_budget)], dtype=mx.float32),
             group=self._group,
         )
-        # .item() evals.
-        max_pressure = float(mx.max(all_pressure).item())
-        return max_pressure
+        # On the CPU before the GPU ops below (see PipelineLastLayer)
+        mx.eval(gathered)
+        # .tolist() evals.
+        worst_pressure, any_over_budget = cast(
+            list[float], mx.max(gathered.reshape(-1, 2), axis=0).tolist()
+        )
+        return worst_pressure > _MEMORY_THRESHOLD or any_over_budget > 0
+
+
+def _entry_nbytes(cache: KVCacheType, snapshots: list[CacheSnapshot] | None) -> int:
+    total = sum(int(c.nbytes) for c in cache)
+    for snapshot in snapshots or []:
+        total += sum(
+            int(state.nbytes) for state in snapshot.states if state is not None
+        )
+    return total
+
+
+def _clear_non_trimmable(c: ArraysCache | RotatingKVCache) -> None:
+    """Empty a cache that cannot be trimmed, keeping its configuration."""
+    if isinstance(c, ArraysCache):
+        c.cache = [None] * len(c.cache)
+    else:
+        c.keys = None
+        c.values = None
+        c.offset = 0
+        c._idx = 0
 
 
 def trim_cache(
@@ -476,27 +464,30 @@ def trim_cache(
     snapshot: CacheSnapshot | None = None,
 ) -> None:
     for i, c in enumerate(cache):
-        non_trimmable = isinstance(c, (ArraysCache, RotatingKVCache)) or (
-            isinstance(c, CacheList) and not bool(c.is_trimmable())  # type: ignore[reportUnknownMemberType]
-        )
-        if non_trimmable:
+        if isinstance(c, SnapshotCache):
+            # It can only go back to a snapshot.
+            if snapshot is None or snapshot.states[i] is None:
+                raise ValueError(f"Cannot trim {type(c).__name__} without a snapshot")
+            restored = copy_snapshot_entry(snapshot.states[i])
+            assert restored is not None
+            cache[i] = restored  # type: ignore
+            continue
+        # DeepSeek V4's cache can't trim its compressor state (its trim() is a no-op), so it
+        # is restored from the snapshot like the other non-trimmable entries.
+        if is_non_trimmable_cache_entry(c):
             if snapshot is not None and snapshot.states[i] is not None:
                 restored = copy_snapshot_entry(snapshot.states[i])
                 if restored is not None:
                     cache[i] = restored  # type: ignore
             elif isinstance(c, (ArraysCache, RotatingKVCache)):
-                c.state = [None] * len(c.state)
-                if isinstance(c, RotatingKVCache):
-                    c.offset = 0
-                    c._idx = 0
+                _clear_non_trimmable(c)
+            elif isinstance(c, DeepseekV4Cache):
+                cache[i] = DeepseekV4Cache(c.local.max_size)  # type: ignore
             else:
                 # CacheList without a snapshot — zero each inner cache's state
                 for inner in c:  # type: ignore[reportUnknownVariableType]
                     if isinstance(inner, (ArraysCache, RotatingKVCache)):
-                        inner.state = [None] * len(inner.state)
-                        if isinstance(inner, RotatingKVCache):
-                            inner.offset = 0
-                            inner._idx = 0
+                        _clear_non_trimmable(inner)
         else:
             c.trim(num_tokens)
 
@@ -519,7 +510,8 @@ def _entry_length(
     | QuantizedKVCache
     | ArraysCache
     | CacheList
-    | DeepseekV4Cache,
+    | DeepseekV4Cache
+    | SnapshotCache,
 ) -> int:
     # Use .offset attribute which KVCache types have (len() not implemented in older QuantizedKVCache).
     if hasattr(c, "offset"):
@@ -536,14 +528,22 @@ def cache_length(cache: KVCacheType) -> int:
 
 
 def get_prefix_length(prompt: mx.array, cached_prompt: mx.array) -> int:
-    """Find the length of the common prefix between two token arrays."""
+    """Find the length of the common prefix between two token arrays.
+
+    Compared on the CPU: the token ids are small and already evaluated, while a comparison
+    on the GPU waits for all the work queued ahead of it (the running batch's decode steps),
+    once for every cached prompt a new request is checked against.
+    """
     n = min(int(prompt.shape[0]), int(cached_prompt.shape[0]))
     if n == 0:
         return 0
 
-    equal = mx.equal(prompt[:n], cached_prompt[:n]).astype(mx.int32)
-    prefix_mask = mx.cumprod(equal)  # stays 1 until first mismatch, then 0 forever
-    return int(mx.sum(prefix_mask).item())
+    tokens: npt.NDArray[np.int64] = np.asarray(prompt, dtype=np.int64)[:n]
+    cached: npt.NDArray[np.int64] = np.asarray(cached_prompt, dtype=np.int64)[:n]
+    different: npt.NDArray[np.bool_] = np.not_equal(tokens, cached)
+    if different.any():
+        return int(np.argmax(different))
+    return n
 
 
 def get_available_memory() -> Memory:

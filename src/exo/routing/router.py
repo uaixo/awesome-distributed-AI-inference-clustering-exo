@@ -3,7 +3,7 @@ from copy import copy
 from itertools import count
 from math import inf
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 
 from anyio import (
     BrokenResourceError,
@@ -13,18 +13,21 @@ from anyio import (
 )
 from exo_rs import (
     FromSwarm,
+    MembershipSnapshot,
     NetworkingHandle,
 )
 from loguru import logger
 
+from exo import __version__
 from exo.shared.constants import EXO_NODE_ZID
 from exo.shared.types.common import NodeId
 from exo.utils.channels import Receiver, Sender, channel
 from exo.utils.pydantic_ext import FrozenModel
 from exo.utils.task_group import TaskGroup
 
-from .connection_message import ConnectionMessage
-from .topics import CONNECTION_MESSAGES, PublishPolicy, TypedTopic
+from .membership import Member
+from .topics import MEMBERSHIP, PublishPolicy, TypedTopic
+from .wire import DEFAULT_CLUSTER_NAME, WIRE_VERSION, DeviceOnOtherVersion, build_id
 
 
 # A significant current limitation of the TopicRouter is that it is not capable
@@ -84,7 +87,21 @@ class TopicRouter[T: FrozenModel]:
         self.senders -= to_clear
 
     async def publish_bytes(self, data: bytes):
-        await self.publish(self.topic.deserialize(data))
+        # Every node receives every message on a topic, including topics nothing on this node
+        # reads (only the master reads local events, one per generated token). Parsing those
+        # took about half of a follower's time under load, so skip messages nobody will get.
+        if not self.senders:
+            return
+        try:
+            item = self.topic.deserialize(data)
+        except ValueError as error:
+            # A message this node can't read (from a buggy or different version of exo) is
+            # dropped: letting the error out would stop the node's whole receive loop
+            logger.opt(exception=error).error(
+                f"Dropping a message on {self.topic.topic} that couldn't be read: {data[:300]!r}"
+            )
+            return
+        await self.publish(item)
 
     def new_sender(self) -> Sender[T]:
         return self._sender.clone()
@@ -104,10 +121,21 @@ class Router:
         namespace: str,
         listen_port: int,
         discovery_service_port: int,
+        wire_version: int = WIRE_VERSION,
+        build: str | None = None,
     ) -> "Router":
+        """Networking that connects only to nodes with the same namespace, wire version and
+        build (this node's, unless given)."""
         return cls(
             handle=NetworkingHandle.new(
-                identity, namespace, listen_port, discovery_service_port
+                identity,
+                namespace,
+                wire_version,
+                build if build is not None else build_id(),
+                # Exos from before wire versions used the package version as the default name
+                __version__ if namespace == DEFAULT_CLUSTER_NAME else None,
+                listen_port,
+                discovery_service_port,
             )
         )
 
@@ -129,7 +157,19 @@ class Router:
         router = TopicRouter[T](topic, send)
         self.topic_routers[topic.topic] = cast(TopicRouter[FrozenModel], router)
         if self._tg.is_running():
-            await self._networking_subscribe(topic.topic)
+            await self._networking_subscribe(topic)
+
+    def devices_on_other_versions(self) -> list[DeviceOnOtherVersion]:
+        """Devices on the network in this namespace that can't join: they run another wire
+        version or build of exo, or one from before wire versions."""
+        return [
+            DeviceOnOtherVersion(
+                addresses=addresses,
+                reason=cast(Literal["older_exo", "wire_version", "build"], reason),
+                wire_version=wire_version,
+            )
+            for addresses, reason, wire_version in self._net.devices_on_other_versions()
+        ]
 
     def sender[T: FrozenModel](self, topic: TypedTopic[T]) -> Sender[T]:
         router = self.topic_routers.get(topic.topic, None)
@@ -162,8 +202,8 @@ class Router:
                 tg.start_soon(self._networking_recv)
                 tg.start_soon(self._networking_publish)
                 # subscribe to pending topics
-                for topic in self.topic_routers:
-                    await self._networking_subscribe(topic)
+                for router in self.topic_routers.values():
+                    await self._networking_subscribe(router.topic)
                 # Router only shuts down if you cancel it.
                 await sleep_forever()
         finally:
@@ -171,13 +211,31 @@ class Router:
                 for topic in self.topic_routers:
                     await self._networking_unsubscribe(str(topic))
 
+    def members(self) -> MembershipSnapshot:
+        """This node's view of the cluster's membership now, from the networking layer"""
+        return self._net.members()
+
+    def heard_from(self, node: NodeId) -> None:
+        """Tells the networking layer's membership that exo on `node` reported"""
+        self._net.heard_from(node)
+
+    def listed(self, node: NodeId) -> None:
+        """Tells the networking layer's membership that the cluster's state lists `node`"""
+        self._net.listed(node)
+
+    def forget(self, node: NodeId) -> None:
+        """The coordinator removed `node`: the networking layer's quorum read stops counting it"""
+        self._net.forget(node)
+
     async def shutdown(self):
         logger.debug("Shutting down Router")
         self._tg.cancel_tasks()
 
-    async def _networking_subscribe(self, topic: str):
-        await self._net.gossipsub_subscribe(topic)
-        logger.info(f"Subscribed to {topic}")
+    async def _networking_subscribe[T: FrozenModel](self, topic: TypedTopic[T]):
+        await self._net.gossipsub_subscribe(
+            topic.topic, high_priority=topic.high_priority
+        )
+        logger.info(f"Subscribed to {topic.topic}")
 
     async def _networking_unsubscribe(self, topic: str):
         await self._net.gossipsub_unsubscribe(topic)
@@ -198,16 +256,14 @@ class Router:
                             continue
                         router = self.topic_routers[topic]
                         await router.publish_bytes(data)
-                    case FromSwarm.Connection():
-                        message = ConnectionMessage.from_update(from_swarm)
-                        logger.trace(
-                            f"Received message on connection_messages with payload {message}"
-                        )
-                        if CONNECTION_MESSAGES.topic in self.topic_routers:
-                            router = self.topic_routers[CONNECTION_MESSAGES.topic]
-                            assert router.topic.model_type == ConnectionMessage
-                            router = cast(TopicRouter[ConnectionMessage], router)
-                            await router.publish(message)
+                    case FromSwarm.Membership():
+                        member = Member.from_swarm(from_swarm)
+                        logger.trace(f"Membership change: {member}")
+                        if MEMBERSHIP.topic in self.topic_routers:
+                            router = self.topic_routers[MEMBERSHIP.topic]
+                            assert router.topic.model_type == Member
+                            router = cast(TopicRouter[Member], router)
+                            await router.publish(member)
                     case _:
                         logger.critical(
                             "failed to exhaustively check FromSwarm messages - logic error"

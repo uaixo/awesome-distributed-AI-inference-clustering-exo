@@ -4,16 +4,20 @@ from collections.abc import Generator
 from dataclasses import dataclass
 
 import mlx.core as mx
+import mlx.nn as nn
 from mlx_lm.tokenizer_utils import TokenizerWrapper
 
+from exo.download.download_utils import build_model_path
 from exo.shared.types.common import ModelId
-from exo.shared.types.events import Event
+from exo.shared.types.events import RunnerEvent
 from exo.shared.types.tasks import TaskId
 from exo.shared.types.worker.instances import BoundInstance
 from exo.shared.types.worker.runner_response import ModelLoadingResponse
 from exo.utils.channels import MpReceiver, MpSender
 from exo.worker.engines.base import Builder, Engine
+from exo.worker.engines.mlx.models.registry import architecture_for_model
 from exo.worker.runner.bootstrap import logger
+from exo.worker.runner.context_length import read_model_context_length
 from exo.worker.runner.llm_inference.batch_generator import (
     BatchGenerator,
     SequentialGenerator,
@@ -25,19 +29,35 @@ from .types import Model
 from .utils_mlx import (
     initialize_mlx,
     load_mlx_items,
+    use_generation_stream_by_default,
 )
 from .vision import VisionProcessor
+
+
+def generates_in_batches(model: nn.Module) -> bool:
+    """Whether requests share batched decode steps (BatchGenerator) or run one at a time
+    (SequentialGenerator): batching is off with EXO_NO_BATCH, or for a model family whose
+    cache can't be batched."""
+    if os.environ.get("EXO_NO_BATCH"):
+        return False
+    architecture = architecture_for_model(model)
+    return architecture is None or architecture.batched_generation
 
 
 @dataclass
 class MlxBuilder(Builder):
     model_id: ModelId
-    event_sender: MpSender[Event]
+    event_sender: MpSender[RunnerEvent]
     cancel_receiver: MpReceiver[TaskId]
     inference_model: Model | None = None
     tokenizer: TokenizerWrapper | None = None
     group: mx.distributed.Group | None = None
     vision_processor: VisionProcessor | None = None
+    # The longest context the loaded model takes; 0 if unknown
+    context_length: int = 0
+
+    def __post_init__(self) -> None:
+        use_generation_stream_by_default()
 
     def connect(self, bound_instance: BoundInstance) -> None:
         self.group = initialize_mlx(bound_instance)
@@ -48,6 +68,11 @@ class MlxBuilder(Builder):
             self.tokenizer,
             self.vision_processor,
         ) = yield from load_mlx_items(bound_instance, self.group)
+        card = bound_instance.bound_shard.model_card
+        self.context_length = read_model_context_length(
+            build_model_path(card.model_id), card.context_length
+        )
+        logger.info(f"model takes up to {self.context_length} tokens of context")
 
     def close(self) -> None:
         with contextlib.suppress(NameError, AttributeError):
@@ -83,7 +108,7 @@ class MlxBuilder(Builder):
         kv_prefix_cache = KVPrefixCache(self.group)
 
         device_rank = 0 if self.group is None else self.group.rank()
-        if os.environ.get("EXO_NO_BATCH"):
+        if not generates_in_batches(self.inference_model):
             logger.info("using SequentialGenerator (batching disabled)")
             return SequentialGenerator(
                 model=self.inference_model,
@@ -96,6 +121,7 @@ class MlxBuilder(Builder):
                 cancel_receiver=self.cancel_receiver,
                 event_sender=self.event_sender,
                 vision_processor=vision_processor,
+                context_length=self.context_length,
             )
         else:
             logger.info("using BatchGenerator")
@@ -110,4 +136,5 @@ class MlxBuilder(Builder):
                 cancel_receiver=self.cancel_receiver,
                 event_sender=self.event_sender,
                 vision_processor=vision_processor,
+                context_length=self.context_length,
             )

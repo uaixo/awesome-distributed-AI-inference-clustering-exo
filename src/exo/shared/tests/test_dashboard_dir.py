@@ -27,9 +27,8 @@ def test_importing_constants_does_not_locate_the_dashboard():
 
 def test_dashboard_dir_reports_a_missing_build():
     """The error a contributor who skipped `npm run build` needs to see, raised where it is used."""
-    env = {k: v for k, v in os.environ.items() if k != "EXO_DASHBOARD_DIR"}
     with (
-        mock.patch.dict(os.environ, env, clear=True),
+        mock.patch.object(constants, "_DASHBOARD_DIR_ENV", None),
         mock.patch.object(constants, "find_dashboard", side_effect=FileNotFoundError),
         pytest.raises(FileNotFoundError),
     ):
@@ -41,4 +40,7 @@ def test_dashboard_dir_honours_the_env_override():
     with mock.patch.dict(
         os.environ, {"EXO_DASHBOARD_DIR": "/tmp/exo-dashboard"}, clear=False
     ):
+        importlib.reload(constants)
         assert Path("/tmp/exo-dashboard") == constants.dashboard_dir()
+
+    importlib.reload(constants)

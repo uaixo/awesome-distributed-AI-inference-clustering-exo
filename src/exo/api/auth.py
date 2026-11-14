@@ -24,8 +24,10 @@ from starlette.responses import JSONResponse
 from starlette.routing import BaseRoute, Match
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from exo.api.cluster_routes import SERVING_PATH
 from exo.api.types.api import ErrorInfo, ErrorResponse
 from exo.shared.constants import EXO_API_AUTH_DISABLED, EXO_API_KEY_FILE
+from exo.worker.serving import DELIVER_PATH, SERVE_PATH
 
 API_KEY_BYTES = 32
 """Entropy of a generated key: 256 bits, past brute force across a network."""
@@ -45,6 +47,18 @@ PUBLIC_PATHS = frozenset({"/node_id"})
 
 A node probes a peer's `/node_id` to measure the network profile, which happens
 before it could hold that peer's key; gating it tears down every topology edge.
+"""
+
+CLUSTER_PATHS = frozenset({SERVE_PATH, DELIVER_PATH, SERVING_PATH})
+"""Routes the nodes of a cluster call on each other, reachable without a key.
+
+A node serves a request by streaming it over HTTP from the node that runs the model
+(`exo.api.cluster_routes`), and each node holds only its own key unless the operator
+gave every node the same `EXO_API_KEY`, so a key here would refuse every request one
+node serves for another. These routes are guarded by who is calling instead: each
+handler answers only loopback and the addresses of the cluster's own nodes
+(`exo.shared.serving.is_member_address`). Listed by exact path, so a route added there
+later is still protected by the key until it is named here.
 """
 
 BEARER_SCHEME = b"bearer"
@@ -205,9 +219,10 @@ class BearerTokenMiddleware:
     routes here return a `StreamingResponse`, and a pass-through that leaves
     `receive` and `send` untouched cannot affect flushing or client disconnects.
 
-    A request is refused unless it is a CORS preflight, names a public path, or
-    names a dashboard asset. Anything else is protected whether or not a route
-    currently matches it, so adding a route cannot forget to protect it.
+    A request is refused unless it is a CORS preflight, names a public path or
+    one of the cluster's own routes, or names a dashboard asset. Anything else is
+    protected whether or not a route currently matches it, so adding a route
+    cannot forget to protect it.
     """
 
     def __init__(
@@ -243,7 +258,7 @@ class BearerTokenMiddleware:
             # A browser never attaches credentials to a preflight.
             return False
         path = cast(str, scope["path"])
-        if path in PUBLIC_PATHS:
+        if path in PUBLIC_PATHS or path in CLUSTER_PATHS:
             return False
         if any(route.matches(scope)[0] is not Match.NONE for route in self._api_routes):
             # PARTIAL counts: the path names an API route under another method, and

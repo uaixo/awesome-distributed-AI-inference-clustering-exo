@@ -5,6 +5,7 @@
 //  Created by Jake Hillion on 2026-02-03.
 //
 
+import AppKit
 import Foundation
 
 /// Command line options for the EXO app
@@ -55,6 +56,12 @@ func isRunningAsRoot() -> Bool {
     return getuid() == 0
 }
 
+/// Whether the app was launched by XCTest to host the unit tests: see
+/// `TestHostSignals`.
+func isHostingUnitTests() -> Bool {
+    isRunningTests
+}
+
 // Main entry point
 let command = parseArguments()
 
@@ -80,6 +87,14 @@ case .uninstall:
     exit(success ? 0 : 1)
 
 case .none:
-    // Start normal GUI application
-    EXOApp.main()
+    if isHostingUnitTests() {
+        // `xcodebuild test` runs the unit tests inside the app. Host them
+        // without starting exo, asking to install the network service or
+        // registering a login item on the Mac that runs the tests.
+        NSApplication.shared.setActivationPolicy(.prohibited)
+        NSApplication.shared.run()
+    } else {
+        // Start normal GUI application
+        EXOApp.main()
+    }
 }

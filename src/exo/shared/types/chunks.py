@@ -1,5 +1,5 @@
 from collections.abc import Generator
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from exo.api.types import (
     FinishReason,
@@ -10,10 +10,8 @@ from exo.api.types import (
     Usage,
 )
 from exo.shared.models.model_cards import ModelId
-from exo.utils.pydantic_ext import TaggedModel
+from exo.utils.pydantic_ext import ByTag, TaggedModel
 from exo.worker.runner.diagnostics import KnownRunnerDiagnostic
-
-from .common import CommandId
 
 
 class BaseChunk(TaggedModel):
@@ -32,6 +30,7 @@ class TokenChunk(BaseChunk):
 
 
 class ErrorChunk(BaseChunk):
+    # One short sentence for the user (see exo.shared.request_errors); details go to the logs
     error_message: str
     finish_reason: Literal["error"] = "error"
 
@@ -68,21 +67,6 @@ class ImageChunk(BaseChunk):
                 yield name, value
 
 
-class InputImageChunk(BaseChunk):
-    command_id: CommandId
-    data: str
-    chunk_index: int
-    total_chunks: int
-    image_index: int = 0
-
-    def __repr_args__(self) -> Generator[tuple[str, Any], None, None]:
-        for name, value in super().__repr_args__():  # pyright: ignore[reportAny]
-            if name == "data" and hasattr(value, "__len__"):  # pyright: ignore[reportAny]
-                yield name, f"<{len(self.data)} chars>"
-            elif name is not None:
-                yield name, value
-
-
 class PrefillProgressChunk(BaseChunk):
     """Data class for prefill progress events during streaming."""
 
@@ -92,4 +76,5 @@ class PrefillProgressChunk(BaseChunk):
 
 StatusChunk = PrefillProgressChunk
 GenerationChunk = TokenChunk | ImageChunk | ToolCallChunk | ErrorChunk
-Chunk = StatusChunk | GenerationChunk
+# Validated by tag (see ByTag): every token of a reply is one
+Chunk = Annotated[StatusChunk | GenerationChunk, ByTag()]
